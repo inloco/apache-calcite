@@ -968,6 +968,19 @@ allprojects {
                 // Some of the artifacts do not need to be published
                 return@configure
             }
+            repositories {
+                maven {
+                    name = "IncogniaMaven"
+                    url = if (rootProject.version.toString().endsWith("SNAPSHOT")) {
+                        uri("s3://inloco-global-maven/snapshots")
+                    } else {
+                        uri("s3://inloco-global-maven/releases")
+                    }
+                    authentication {
+                        val awsIm by registering(AwsImAuthentication::class)
+                    }
+                }
+            }
             publications {
                 create<MavenPublication>(project.name) {
                     artifactId = base.archivesName.get()
