@@ -31,6 +31,7 @@ import org.apache.calcite.linq4j.tree.Expressions;
 import org.apache.calcite.linq4j.tree.ParameterExpression;
 import org.apache.calcite.linq4j.tree.Primitive;
 import org.apache.calcite.linq4j.tree.Statement;
+import org.apache.calcite.linq4j.tree.Types.RecordType;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rel.type.RelDataTypeField;
 import org.apache.calcite.rex.RexBuilder;
@@ -1401,7 +1402,7 @@ public class RexToLixTranslator implements RexVisitor<RexToLixTranslator.Result>
     default:
       break;
     }
-    return javaClass == null || javaClass == Void.class
+    return javaClass == null || javaClass == Void.class || javaClass instanceof RecordType
         ? RexImpTable.NULL_EXPR
         : Expressions.constant(null, javaClass);
   }
@@ -1490,7 +1491,8 @@ public class RexToLixTranslator implements RexVisitor<RexToLixTranslator.Result>
    * }
    */
   private Result implementCaseWhen(RexCall call) {
-    final Type returnType = typeFactory.getJavaClass(call.getType());
+    final Type returnType = currentStorageType != null
+        ? currentStorageType : typeFactory.getJavaClass(call.getType());
     final ParameterExpression valueVariable =
         Expressions.parameter(returnType,
             list.newName("case_when_value"));
