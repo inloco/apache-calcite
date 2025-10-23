@@ -133,9 +133,22 @@ tasks.validateBeforeBuildingReleaseArtifacts {
 
 val String.v: String get() = rootProject.extra["$this.version"] as String
 
-val buildVersion = "calcite".v + releaseParams.snapshotSuffix
+fun currentCommit(): String {
+    return try {
+        val gitHash = providers.exec {
+            commandLine("git", "rev-parse", "--short", "HEAD")
+        }.standardOutput.asText.get().trim()
+        gitHash
+    } catch (e: Exception) {
+        "unknown"
+    }
+}
 
-println("Building Apache Calcite $buildVersion")
+val gitHash = currentCommit()
+val baseVersion = "calcite".v
+val buildVersion = if (gitHash != "unknown") "$baseVersion-$gitHash" else baseVersion
+
+println("Building Apache Calcite $buildVersion (git: $gitHash)")
 
 releaseArtifacts {
     fromProject(":release")
