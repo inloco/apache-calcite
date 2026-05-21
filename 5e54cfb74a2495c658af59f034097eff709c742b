@@ -1,0 +1,16 @@
+{
+  "event": "security_override",
+  "timestamp": "2026-05-21T12:04:03.318495",
+  "user": "joao.ayalla@incognia.com",
+  "branch": "fix-nokogiri-vuln",
+  "files": [
+    "core/src/test/java/org/apache/calcite/test/SqlFunctionsTest.java",
+    "testkit/src/main/java/org/apache/calcite/test/CalciteAssert.java",
+    "testkit/src/main/java/org/apache/calcite/test/SqlOperatorTest.java"
+  ],
+  "detectors": [
+    "JDBC",
+    "Gitleaks: incognia-api-credentials"
+  ],
+  "secrets_found": 27
+}
