@@ -7760,7 +7760,7 @@ LogicalDelta
     </Resource>
     <Resource name="plan">
       <![CDATA[
-LogicalProject(EXPR$0=[AND(=(1, CAST('y'):INTEGER NOT NULL), =(CAST('x'):INTEGER NOT NULL, 1))])
+LogicalProject(EXPR$0=[AND(=(1, 'y'), =('x', 1))])
   LogicalValues(tuples=[[{ 0 }]])
 ]]>
     </Resource>

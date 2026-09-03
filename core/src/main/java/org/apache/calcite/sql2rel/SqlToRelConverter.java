@@ -5647,11 +5647,14 @@ public class SqlToRelConverter {
           root = convertQueryRecursive(query, true, null);
           // ORDER BY expressions may add internal fields to the relational
           // expression. ARRAY must contain only the query's selected fields.
-          final RelNode arrayInput = query instanceof SqlSelect
+          final int selectedFieldCount = query instanceof SqlSelect
+              ? ((SqlSelect) query).getSelectList().size()
+              : root.rel.getRowType().getFieldCount();
+          final RelNode arrayInput = root.rel.getRowType().getFieldCount()
+              > selectedFieldCount
               ? RelOptUtil.createProject(root.rel,
-                  ImmutableIntList.range(0,
-                      ((SqlSelect) query).getSelectList().size()))
-              : root.project(true);
+                  ImmutableIntList.range(0, selectedFieldCount))
+              : root.rel;
           return RexSubQuery.array(arrayInput);
 
         case MAP_QUERY_CONSTRUCTOR:
