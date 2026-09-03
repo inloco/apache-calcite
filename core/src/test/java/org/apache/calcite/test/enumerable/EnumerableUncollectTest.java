@@ -34,6 +34,28 @@ class EnumerableUncollectTest {
             "y=4");
   }
 
+  @Test void arraySubQueryPreservesUnnestOrder() {
+    final String sql = "select a as source_array,"
+        + " array(select y from unnest(a) as u(y)) as transformed_array,"
+        + " ARRAY_DISTINCT(array(select y from unnest(a) as u(y))) as distinct_array"
+        + " from (values (array[cast('analytics_pixel_tag_helper' as varchar),"
+        + " cast('ad_blocker' as varchar), cast('randomized_extension' as varchar)])) as t(a)";
+    tester()
+        .with(CalciteConnectionProperty.FUN, "spark")
+        .query(sql)
+        .returns("source_array=[analytics_pixel_tag_helper, ad_blocker, randomized_extension]; "
+            + "transformed_array=[analytics_pixel_tag_helper, ad_blocker, randomized_extension]; "
+            + "distinct_array=[analytics_pixel_tag_helper, ad_blocker, randomized_extension]\n");
+  }
+
+  @Test void orderedArraySubQueryWithOrdinality() {
+    final String sql = "select array(select y from unnest(a) with ordinality as u(y, o) order by o)"
+        + " from (values (array[cast('a' as varchar), cast('b' as varchar)])) as t(a)";
+    tester()
+        .query(sql)
+        .returns("EXPR$0=[a, b]\n");
+  }
+
   @Test void simpleUnnestNullArray() {
     final String sql = "SELECT * FROM UNNEST(CAST(null AS INTEGER ARRAY))";
     tester()
