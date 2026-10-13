@@ -17,7 +17,10 @@
 
 # Database of contributors to Apache Calcite.
 # Pages such as developer.md use this data.
+#
 # List must be sorted by first name, last name.
+# The following directive tells LintTest to check:
+# // lint: sort where ' name:' erase '^.*name:'
 #
 - name: Alan Gates
   emeritus: 2018/05/04
@@ -249,7 +252,8 @@
   apacheId: mbudiu
   githubId: mihaibudiu
   org: Feldera.com
-  role: PMC
+  role: PMC Chair
+  homepage: https://mihaibudiu.github.io/work/index.html
 - name: Milinda Pathirage
   apacheId: milinda
   githubId: milinda
@@ -291,8 +295,8 @@
 - name: Ruben Quesada Lopez
   apacheId: rubenql
   githubId: rubenada
-  org: Voltron Data
-  role: PMC Chair
+  org: Cloudera
+  role: PMC
 - name: Rui Wang
   apacheId: amaliujia
   githubId: amaliujia
@@ -313,6 +317,11 @@
   apacheId: shuyichen
   githubId: suez1224
   org: Uber
+  role: Committer
+- name: Silun Dong
+  apacheId: silun
+  githubId: silundong
+  org:
   role: Committer
 - name: Slim Bouguerra
   apacheId: bslim
@@ -342,6 +351,12 @@
   githubId: tdunning
   org: MapR
   role: PMC
+- name: Thomas Rebele
+  apacheId: thomasrebele
+  githubId: thomasrebele
+  pronouns: he/him
+  org: Cloudera
+  role: Committer
 - name: TJ Banghart
   apacheId: tjbanghart
   githubId: tjbanghart
@@ -373,6 +388,11 @@
   githubId: yanlin-Lynn
   org: Ant Financial
   role: Committer
+- name: Weihua Zhang
+  apacheId: zwh
+  githubId: iwanttobepowerful
+  org: Tencent
+  role: Committer
 - name: Xiong Duan
   apacheId: xiong
   githubId: NobiGo
@@ -384,6 +404,11 @@
   githubId: liuyongvs
   pronouns: he/him
   org: Ant Financial
+  role: Committer
+- name: Yu Xu
+  apacheId: xuzifu666
+  githubId: xuzifu666
+  org:
   role: Committer
 - name: Zhaohui Xu
   apacheId: zhaohui
@@ -400,7 +425,7 @@
   apacheId: zhenchen
   githubId: xiedeyantu
   org:
-  role: Committer
+  role: PMC
 - name: Zhen Wang
   apacheId: zhenw
   githubId: zinking

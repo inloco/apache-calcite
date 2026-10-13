@@ -45,6 +45,10 @@ public abstract class SqlAbstractConformance implements SqlConformance {
     return SqlConformanceEnum.DEFAULT.isSelectAlias();
   }
 
+  @Override public boolean isNonStrictGroupBy() {
+    return SqlConformanceEnum.DEFAULT.isNonStrictGroupBy();
+  }
+
   @Override public boolean isGroupByOrdinal() {
     return SqlConformanceEnum.DEFAULT.isGroupByOrdinal();
   }
@@ -79,6 +83,10 @@ public abstract class SqlAbstractConformance implements SqlConformance {
 
   @Override public boolean isBangEqualAllowed() {
     return SqlConformanceEnum.DEFAULT.isBangEqualAllowed();
+  }
+
+  @Override public boolean isColonFieldAccessAllowed() {
+    return SqlConformanceEnum.DEFAULT.isColonFieldAccessAllowed();
   }
 
   @Override public boolean isMinusAllowed() {
@@ -159,5 +167,9 @@ public abstract class SqlAbstractConformance implements SqlConformance {
 
   @Override public boolean checkedArithmetic() {
     return SqlConformanceEnum.DEFAULT.checkedArithmetic();
+  }
+
+  @Override public boolean supportsUnsignedTypes() {
+    return SqlConformanceEnum.DEFAULT.supportsUnsignedTypes();
   }
 }

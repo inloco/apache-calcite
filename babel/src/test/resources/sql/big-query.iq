@@ -27,8 +27,57 @@
 # The DATETIME() and TIMESTAMP() functions are also substituted so that they
 # produce values that BigQuery would call DATETIME and TIMESTAMP.
 #
+# Note: scott-big-query sets the TIME ZONE to UTC for deterministic test results
+# for tests that involve TIME ZONE
 !use scott-big-query
 !set outputformat mysql
+
+# Test case for [CALCITE-7491] https://issues.apache.org/jira/browse/CALCITE-7491
+# Literals of type TIMESTAMP WITH TIME ZONE cause crashes
+# This will change once we fix [CALCITE-7494]
+# Avatica conversion to string of TIMESTAMP WITH TIME ZONE
+# does not include time zone
+select TIMESTAMP WITH TIME ZONE '2020-01-01 00:00:00 America/New_York';
++---------------------+
+| EXPR$0              |
++---------------------+
+| 2020-01-01 05:00:00 |
++---------------------+
+(1 row)
+
+!ok
+
+# Two timestamps with time zone are equal if they represent the same UTC time
+SELECT TIMESTAMP WITH TIME ZONE '2020-01-01 08:10:10 America/New_York' = TIMESTAMP WITH TIME ZONE '2020-01-01 05:10:10 America/Los_Angeles';
++--------+
+| EXPR$0 |
++--------+
+| true   |
++--------+
+(1 row)
+
+!ok
+
+# Two equal timestamps in different time zones are different if they represent different UTC times
+SELECT TIMESTAMP WITH TIME ZONE '2020-01-01 08:10:10 America/New_York' = TIMESTAMP WITH TIME ZONE '2020-01-01 08:10:10 America/Los_Angeles';
++--------+
+| EXPR$0 |
++--------+
+| false  |
++--------+
+(1 row)
+
+!ok
+
+# Two tests for [CALCITE-7094] Using a type alias as a constructor function
+# causes a validator assertion failure
+select int64();
+Cannot apply 'int64' to arguments of type 'int64()'. Supported form(s): int64
+!error
+
+select int64(2);
+Cannot apply 'int64' to arguments of type 'int64(<INTEGER>)'. Supported form(s): int64
+!error
 
 # TODO: create a means to set the current date/time/timestamp for the
 #   current session CURRENT_TIMESTAMP etc. will return those values.
@@ -544,19 +593,18 @@ FROM t;
 !ok
 !}
 
-!if (false) {
-WITH Input AS (SELECT TIMESTAMP("2008-12-25 05:30:00+00") AS timestamp_value)
+# Test case for [CALCITE-7522] Allow EXTRACT(interval FROM tz) to operate on TIMESTAMP WITH TIME ZONE
 SELECT
-  EXTRACT(DAY FROM timestamp_value AT TIME ZONE "UTC") AS the_day_utc,
-  EXTRACT(DAY FROM timestamp_value AT TIME ZONE "America/Los_Angeles") AS the_day_california
-FROM Input;
+  EXTRACT(DAY FROM TIMESTAMP WITH TIME ZONE '2008-12-25 20:30:00 UTC') AS the_day_utc,
+  EXTRACT(DAY FROM TIMESTAMP WITH TIME ZONE '2008-12-25 20:30:00 America/Los_Angeles') AS the_day_california;
 +-------------+--------------------+
 | the_day_utc | the_day_california |
 +-------------+--------------------+
-| 25          | 24                 |
+|          25 |                 26 |
 +-------------+--------------------+
+(1 row)
+
 !ok
-!}
 
 # Display of results may differ, depending upon the environment and
 # time zone where this query was executed.

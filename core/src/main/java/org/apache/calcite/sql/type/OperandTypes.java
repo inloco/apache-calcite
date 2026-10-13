@@ -31,6 +31,8 @@ import org.apache.calcite.sql.SqlOperandCountRange;
 import org.apache.calcite.sql.SqlOperator;
 import org.apache.calcite.sql.SqlOperatorBinding;
 import org.apache.calcite.sql.SqlUtil;
+import org.apache.calcite.sql.fun.SqlStdOperatorTable;
+import org.apache.calcite.sql.parser.SqlParserPos;
 import org.apache.calcite.sql.util.SqlBasicVisitor;
 import org.apache.calcite.sql.validate.SqlLambdaScope;
 import org.apache.calcite.sql.validate.SqlValidator;
@@ -402,6 +404,70 @@ public abstract class OperandTypes {
   public static final SqlSingleOperandTypeChecker INTEGER =
       family(SqlTypeFamily.INTEGER);
 
+  /** Operand type checker that only allows signed types.
+   * This is almost like an OR of 4 type families (INTEGER, APPROXIMATE_NUMERIC, DECIMAL)
+   * but OR allows implicit casts to any of the types, and this checker doesn't. */
+  public static final SqlSingleOperandTypeChecker SIGNED = new SqlSingleOperandTypeChecker() {
+    @Override public boolean checkSingleOperandType(SqlCallBinding callBinding, SqlNode operand,
+        int iFormalOperand, boolean throwOnFailure) {
+      RelDataType type = SqlTypeUtil.deriveType(callBinding, operand);
+      SqlTypeName typeName = type.getSqlTypeName();
+      boolean isLegal = SqlTypeName.INT_TYPES.contains(typeName)
+          || SqlTypeName.APPROX_TYPES.contains(typeName)
+          || typeName == SqlTypeName.DECIMAL;
+
+      if (!isLegal) {
+        if (throwOnFailure) {
+          throw callBinding.newValidationSignatureError();
+        }
+        return false;
+      }
+      return true;
+    }
+
+    @Override public boolean checkOperandTypes(
+        SqlCallBinding callBinding,
+        boolean throwOnFailure) {
+      // This is a specialized implementation of FamilyOperandTypeChecker.checkOperandTypes.
+      SqlNode op = callBinding.operands().get(0);
+      if (!checkSingleOperandType(callBinding, op, 0, false)) {
+        // try to coerce type if it is allowed.
+        boolean coerced = false;
+        if (callBinding.isTypeCoercionEnabled()) {
+          // Also allow expressions that can be coerced to NUMERIC (e.g. type CHAR)
+          TypeCoercion typeCoercion = callBinding.getValidator().getTypeCoercion();
+          ImmutableList.Builder<RelDataType> builder = ImmutableList.builder();
+          builder.add(callBinding.getOperandType(0));
+          ImmutableList<RelDataType> dataTypes = builder.build();
+          coerced =
+              typeCoercion.builtinFunctionCoercion(
+                  callBinding, dataTypes, ImmutableList.of(SqlTypeFamily.NUMERIC));
+        }
+        // re-validate the new nodes type.
+        SqlNode op1 = callBinding.operands().get(0);
+        if (!checkSingleOperandType(
+            callBinding,
+            op1,
+            0,
+            throwOnFailure)) {
+          return false;
+        }
+        return coerced;
+      }
+      return true;
+    }
+
+    @Override public String getAllowedSignatures(SqlOperator op, String opName) {
+      return SqlUtil.getAliasedSignature(op, opName, ImmutableList.of(SqlTypeFamily.INTEGER)) + "\n"
+          + SqlUtil.getAliasedSignature(
+              op, opName, ImmutableList.of(SqlTypeFamily.APPROXIMATE_NUMERIC)) + "\n"
+          + SqlUtil.getAliasedSignature(op, opName, ImmutableList.of(SqlTypeFamily.DECIMAL));
+    }
+  };
+
+  public static final SqlSingleOperandTypeChecker UNSIGNED_NUMERIC_UNSIGNED_NUMERIC =
+      family(SqlTypeFamily.UNSIGNED_NUMERIC, SqlTypeFamily.UNSIGNED_NUMERIC);
+
   public static final SqlSingleOperandTypeChecker INTEGER_INTEGER =
       family(SqlTypeFamily.INTEGER, SqlTypeFamily.INTEGER);
 
@@ -547,6 +613,38 @@ public abstract class OperandTypes {
           .or(OperandTypes.family(SqlTypeFamily.MAP))
           .or(OperandTypes.family(SqlTypeFamily.VARIANT))
           .or(OperandTypes.family(SqlTypeFamily.ANY));
+
+  /**
+   * Operand type-checking strategy for the colon operator: first operand
+   * must be {@code VARIANT} (or {@code ANY}); the second operand is a
+   * path expression and is not type-checked.
+   */
+  public static final SqlOperandTypeChecker COLON =
+      new SqlOperandTypeChecker() {
+        @Override public boolean checkOperandTypes(SqlCallBinding callBinding,
+            boolean throwOnFailure) {
+          final RelDataType baseType = callBinding.getOperandType(0);
+          switch (baseType.getSqlTypeName()) {
+          case VARIANT:
+          case ANY:
+            return true;
+          default:
+            if (throwOnFailure) {
+              throw callBinding.getValidator().newValidationError(
+                  callBinding.operand(0), RESOURCE.incompatibleTypes());
+            }
+            return false;
+          }
+        }
+
+        @Override public SqlOperandCountRange getOperandCountRange() {
+          return SqlOperandCountRanges.of(2);
+        }
+
+        @Override public String getAllowedSignatures(SqlOperator op, String opName) {
+          return "<VARIANT>:<PATH>";
+        }
+      };
 
   public static final SqlOperandTypeChecker STRING_ARRAY_CHARACTER_OPTIONAL_CHARACTER =
       new FamilyOperandTypeChecker(
@@ -1293,6 +1391,9 @@ public abstract class OperandTypes {
   public static final SqlSingleOperandTypeChecker NUMERIC_OR_INTERVAL =
       NUMERIC.or(INTERVAL);
 
+  public static final SqlSingleOperandTypeChecker SIGNED_OR_INTERVAL =
+      SIGNED.or(INTERVAL);
+
   public static final SqlSingleOperandTypeChecker NUMERIC_OR_STRING =
       NUMERIC.or(STRING);
 
@@ -1551,7 +1652,35 @@ public abstract class OperandTypes {
         }
         return false;
       }
+      // Insert implicit casts for operands whose SqlTypeName differs
+      // from the inferred key/value type.
+      coerceOperands(callBinding, argTypes,
+          componentType.left, componentType.right);
       return true;
+    }
+
+    /** Casts operands whose {@code SqlTypeName} differs from the
+     * target key or value type. Operands at even positions are keys,
+     * odd positions are values. */
+    private static void coerceOperands(SqlCallBinding callBinding,
+        List<RelDataType> operandTypes,
+        RelDataType keyType, RelDataType valueType) {
+      final SqlValidator validator = callBinding.getValidator();
+      final SqlCall call = callBinding.getCall();
+      final List<SqlNode> operands = call.getOperandList();
+      for (int i = 0; i < operands.size(); i++) {
+        final RelDataType targetType = i % 2 == 0 ? keyType : valueType;
+        if (operandTypes.get(i).getSqlTypeName()
+            != targetType.getSqlTypeName()) {
+          final SqlNode castNode =
+              SqlStdOperatorTable.CAST.createCall(SqlParserPos.ZERO,
+                  operands.get(i),
+                  SqlTypeUtil.convertTypeToSpec(targetType)
+                      .withNullable(targetType.isNullable()));
+          call.setOperand(i, castNode);
+          validator.setValidatedNodeType(castNode, targetType);
+        }
+      }
     }
 
     /**

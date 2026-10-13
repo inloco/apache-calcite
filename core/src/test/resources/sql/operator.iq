@@ -76,6 +76,51 @@ select * from "scott".emp where not sal > 1300 and not sal < 1200;
 
 !ok
 
+# [CALCITE-6731] Add support for ^ operator in Calcite
+SELECT CAST(empno AS BIGINT) ^ CAST(deptno AS BIGINT) AS foo FROM "scott".emp LIMIT 5;
++------+
+| FOO  |
++------+
+| 7389 |
+| 7509 |
+| 7551 |
+| 7578 |
+| 7672 |
++------+
+(5 rows)
+
+!ok
+
+# [CALCITE-6731] Add support for ^ operator in Calcite
+SELECT CAST(empno AS BIGINT) ^ CAST(mgr AS INTEGER) AS foo FROM "scott".emp WHERE mgr IS NOT NULL LIMIT 5;
++------+
+| FOO  |
++------+
+| 1012 |
+|  535 |
+|  785 |
+|  857 |
+|  883 |
++------+
+(5 rows)
+
+!ok
+
+# [CALCITE-7109] Add support for << operator in Calcite
+SELECT CAST(deptno AS INTEGER) << CAST(comm AS INTEGER) AS foo FROM "scott".emp
+WHERE comm IS NOT NULL LIMIT 4;
++-----------+
+| FOO       |
++-----------+
+|    122880 |
+|        30 |
+|  31457280 |
+| 503316480 |
++-----------+
+(4 rows)
+
+!ok
+
 # [CALCITE-5531] COALESCE throws ClassCastException
 SELECT COALESCE(DATE '2021-07-08', DATE '2020-01-01') as d;
 +------------+
@@ -231,7 +276,6 @@ order by 1,2;
 
 !ok
 
-!if (fixed.calcite6828) {
 # FLOOR and CEIL of TIME
 select v,
   case when b then 'ceil' else 'floor' end as op,
@@ -253,9 +297,8 @@ order by 1,2;
 | 12:34:56.7 | floor | 12:34:56.6 | 12:34:56.6 | 12:34:56.6 | 12:34:56.6 | 12:34:56.7 | 12:00:00.0 | 12:34:00.0 | 12:34:56.0 |
 +------------+-------+------------+------------+------------+------------+------------+------------+------------+------------+
 (2 rows)
-!ok
 
-!}
+!ok
 
 select "T"."X"[1] as x1 from (VALUES (ROW(ROW(3, 7), ROW(4, 8)))) as T(x, y);
 
@@ -698,6 +741,72 @@ FOO BOOLEAN(1) NOT NULL
 +------+
 | true |
 +------+
+(1 row)
+
+!ok
+
+SELECT 2 ^ 3 AS foo;
++-----+
+| FOO |
++-----+
+|   1 |
++-----+
+(1 row)
+
+!ok
+
+SELECT 0 ^ 0 AS foo;
++-----+
+| FOO |
++-----+
+|   0 |
++-----+
+(1 row)
+
+!ok
+
+SELECT 1 ^ 1 AS foo;
++-----+
+| FOO |
++-----+
+|   0 |
++-----+
+(1 row)
+
+!ok
+
+SELECT 5 ^ 2 AS foo;
++-----+
+| FOO |
++-----+
+|   7 |
++-----+
+(1 row)
+
+!ok
+
+SELECT 255 ^ 128 AS foo;
++-----+
+| FOO |
++-----+
+| 127 |
++-----+
+(1 row)
+
+!ok
+
+-- Bitwise LEFT SHIFT operator `<<`
+SELECT
+  1 << 0 AS shift1,
+  1 << 1 AS shift2,
+  2 << 2 AS shift3,
+  4 << 3 AS shift4,
+  CAST(2 AS SMALLINT) << CAST(3 AS INTEGER) AS cast_shift;
++--------+--------+--------+--------+------------+
+| SHIFT1 | SHIFT2 | SHIFT3 | SHIFT4 | CAST_SHIFT |
++--------+--------+--------+--------+------------+
+|      1 |      2 |      8 |     32 |         16 |
++--------+--------+--------+--------+------------+
 (1 row)
 
 !ok

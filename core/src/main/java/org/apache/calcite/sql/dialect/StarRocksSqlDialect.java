@@ -30,16 +30,20 @@ import org.apache.calcite.sql.SqlCall;
 import org.apache.calcite.sql.SqlDataTypeSpec;
 import org.apache.calcite.sql.SqlDialect;
 import org.apache.calcite.sql.SqlLiteral;
+import org.apache.calcite.sql.SqlMapTypeNameSpec;
 import org.apache.calcite.sql.SqlNode;
 import org.apache.calcite.sql.SqlWriter;
 import org.apache.calcite.sql.fun.SqlFloorFunction;
 import org.apache.calcite.sql.parser.SqlParserPos;
+import org.apache.calcite.sql.type.MapSqlType;
 import org.apache.calcite.sql.type.SqlTypeName;
 import org.apache.calcite.util.RelToSqlConverterUtil;
 
 import org.checkerframework.checker.nullness.qual.Nullable;
 
 import static org.apache.calcite.util.RelToSqlConverterUtil.unparseHiveTrim;
+
+import static java.util.Objects.requireNonNull;
 
 /**
  * A <code>SqlDialect</code> implementation for the StarRocks database.
@@ -127,6 +131,28 @@ public class StarRocksSqlDialect extends MysqlSqlDialect {
     case TRIM:
       unparseHiveTrim(writer, call, leftPrec, rightPrec);
       break;
+    case EXTRACT:
+      writer.print(call.getOperator().getName());
+      final SqlWriter.Frame extractFrame = writer.startList("(", ")");
+      SqlLiteral node = call.operand(0);
+      TimeUnitRange unit = node.getValueAs(TimeUnitRange.class);
+      String funName;
+      switch (unit) {
+      case DOW:
+        funName = "DAYOFWEEK";
+        break;
+      case DOY:
+        funName = "DAYOFYEAR";
+        break;
+      default:
+        funName = unit.name();
+      }
+      writer.print(funName);
+      writer.print(" FROM ");
+      String value = ((SqlLiteral) call.operand(1)).toValue();
+      writer.print("'" + value + "'");
+      writer.endList(extractFrame);
+      break;
     case FLOOR:
       if (call.operandCount() != 2) {
         super.unparseCall(writer, call, leftPrec, rightPrec);
@@ -154,10 +180,20 @@ public class StarRocksSqlDialect extends MysqlSqlDialect {
               type.getSqlTypeName(),
               SqlParserPos.ZERO),
           SqlParserPos.ZERO);
+    case REAL:
+      return new SqlDataTypeSpec(
+          new SqlAlienSystemTypeNameSpec("FLOAT", type.getSqlTypeName(),
+              SqlParserPos.ZERO),
+          SqlParserPos.ZERO);
     case BIGINT:
       return new SqlDataTypeSpec(
           new SqlBasicTypeNameSpec(SqlTypeName.BIGINT, SqlParserPos.ZERO),
           SqlParserPos.ZERO);
+    case UTINYINT:
+    case USMALLINT:
+    case UINTEGER:
+      throw new RuntimeException(
+          "StarRocks doesn't support UNSIGNED TINYINT/SMALLINT/INTEGER!");
     case TIMESTAMP:
       return new SqlDataTypeSpec(
           new SqlAlienSystemTypeNameSpec(
@@ -169,9 +205,30 @@ public class StarRocksSqlDialect extends MysqlSqlDialect {
       return new SqlDataTypeSpec(
           new SqlBasicTypeNameSpec(SqlTypeName.VARCHAR, type.getPrecision(), SqlParserPos.ZERO),
           SqlParserPos.ZERO);
+    case MAP:
+      MapSqlType mapSqlType = (MapSqlType) type;
+      SqlDataTypeSpec keySpec = (SqlDataTypeSpec) getCastSpec(mapSqlType.getKeyType());
+      SqlDataTypeSpec valueSpec =
+          (SqlDataTypeSpec) getCastSpec(mapSqlType.getValueType());
+      SqlDataTypeSpec nonNullKeySpec =
+          requireNonNull(keySpec, "keySpec");
+      SqlDataTypeSpec nonNullValueSpec =
+          requireNonNull(valueSpec, "valueSpec");
+      SqlMapTypeNameSpec sqlMapTypeNameSpec =
+          new SqlMapTypeNameSpec(nonNullKeySpec, nonNullValueSpec, SqlParserPos.ZERO);
+      return new SqlDataTypeSpec(sqlMapTypeNameSpec,
+          SqlParserPos.ZERO);
+    case ARRAY:
+      return RelToSqlConverterUtil.getCastSpecAngleBracketArrayType(this, type,
+          SqlParserPos.ZERO);
+    case MULTISET:
+      throw new UnsupportedOperationException("StarRocks dialect does not support cast to "
+          + type.getSqlTypeName());
     default:
-      return super.getCastSpec(type);
+      break;
     }
+
+    return super.getCastSpec(type);
   }
 
   @Override public void unparseDateTimeLiteral(SqlWriter writer,

@@ -76,6 +76,20 @@ public class BasicSqlType extends AbstractSqlType {
       int precision) {
     this(typeSystem, typeName, false, precision, SCALE_NOT_SPECIFIED, null,
         null);
+  }
+
+  /**
+   * Constructs a type with precision/length and nullability.
+   *
+   * @param typeSystem Type system
+   * @param typeName Type name
+   * @param isNullable Whether the type is nullable
+   * @param precision Precision (called length for some types)
+   */
+  public BasicSqlType(RelDataTypeSystem typeSystem, SqlTypeName typeName,
+      boolean isNullable, int precision) {
+    this(typeSystem, typeName, isNullable, precision, SCALE_NOT_SPECIFIED,
+        null, null);
     checkPrecScale(typeName, true, false);
   }
 
@@ -161,6 +175,10 @@ public class BasicSqlType extends AbstractSqlType {
       case SMALLINT:
       case INTEGER:
       case BIGINT:
+      case UTINYINT:
+      case USMALLINT:
+      case UINTEGER:
+      case UBIGINT:
       case DECIMAL:
         return 0;
       default:
@@ -183,7 +201,13 @@ public class BasicSqlType extends AbstractSqlType {
     // Called to make the digest, which equals() compares;
     // so equivalent data types must produce identical type strings.
 
-    sb.append(typeName.name());
+    if (SqlTypeName.UNSIGNED_TYPES.contains(typeName)) {
+      // All these type names start with U
+      String name = typeName.name().substring(1);
+      sb.append(name).append(" UNSIGNED");
+    } else {
+      sb.append(typeName.name());
+    }
     boolean printPrecision = precision != PRECISION_NOT_SPECIFIED;
     boolean printScale = scale != SCALE_NOT_SPECIFIED;
 

@@ -324,6 +324,25 @@ class ToLogicalConverterTest {
     assertThat(rels[0].deepHashCode() == rels[1].deepHashCode(), is(true));
   }
 
+  /** Test case for <a href="https://issues.apache.org/jira/browse/CALCITE-7159">[CALCITE-7159]
+   * LogicalAsofJoin deepEquals can throw for legal expressions</a>. */
+  @Test void testAsofDeepEquals() {
+    final RelBuilder builder = builder();
+    RelNode[] rels = new RelNode[2];
+    rels[0] = builder.scan("EMP")
+        .scan("DEPT")
+        .asofJoin(JoinRelType.ASOF,
+            builder.equals(
+                builder.field(2, 0, "DEPTNO"),
+                builder.field(2, 1, "DEPTNO")),
+            builder.lessThan(
+                builder.field(2, 1, "DEPTNO"),
+                builder.field(2, 0, "DEPTNO")))
+        .build();
+    rels[1] = builder.scan("EMP").build();
+    assertThat(rels[0].deepEquals(rels[1]), is(false));
+  }
+
   @Test void testCorrelation() {
     final RelBuilder builder = builder();
     final Holder<@Nullable RexCorrelVariable> v = Holder.empty();
@@ -458,12 +477,12 @@ class ToLogicalConverterTest {
   @Test void testWindow() {
     String sql = "SELECT rank() over (order by \"hire_date\") FROM \"employee\"";
     String expectedPhysical = ""
-        + "EnumerableProject($0=[$17])\n"
+        + "EnumerableProject(EXPR$0=[$17])\n"
         + "  EnumerableWindow(window#0=[window(order by [9] aggs [RANK()])])\n"
         + "    JdbcToEnumerableConverter\n"
         + "      JdbcTableScan(table=[[foodmart, employee]])\n";
     String expectedLogical = ""
-        + "LogicalProject($0=[$17])\n"
+        + "LogicalProject(EXPR$0=[$17])\n"
         + "  LogicalWindow(window#0=[window(order by [9] aggs [RANK()])])\n"
         + "    LogicalTableScan(table=[[foodmart, employee]])\n";
     verify(rel(sql), expectedPhysical, expectedLogical);
@@ -474,13 +493,13 @@ class ToLogicalConverterTest {
     String sql = String.format(Locale.ROOT, "SELECT sum(\"salary\") over (order by \"hire_date\" "
         + "rows between unbounded preceding and current row %s) FROM \"employee\"", excludeClause);
     String expectedPhysical =
-        String.format(Locale.ROOT, "EnumerableProject($0=[$17])\n"
+        String.format(Locale.ROOT, "EnumerableProject(EXPR$0=[$17])\n"
             + "  EnumerableWindow(window#0=[window(order by [9] rows between"
             + " UNBOUNDED PRECEDING and CURRENT ROW %saggs [SUM($11)])])\n"
             + "    JdbcToEnumerableConverter\n"
             + "      JdbcTableScan(table=[[foodmart, employee]])\n", expectedExcludeString);
     String expectedLogical =
-        String.format(Locale.ROOT, "LogicalProject($0=[$17])\n"
+        String.format(Locale.ROOT, "LogicalProject(EXPR$0=[$17])\n"
             + "  LogicalWindow(window#0=[window(order by [9] rows between"
             + " UNBOUNDED PRECEDING and CURRENT ROW %saggs [SUM($11)])])\n"
             + "    LogicalTableScan(table=[[foodmart, employee]])\n", expectedExcludeString);

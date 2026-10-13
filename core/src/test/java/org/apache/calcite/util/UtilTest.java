@@ -30,6 +30,7 @@ import org.apache.calcite.runtime.Resources;
 import org.apache.calcite.runtime.SqlFunctions;
 import org.apache.calcite.runtime.Utilities;
 import org.apache.calcite.sql.SqlCollation;
+import org.apache.calcite.sql.SqlNodeList;
 import org.apache.calcite.sql.dialect.CalciteSqlDialect;
 import org.apache.calcite.sql.fun.SqlLibrary;
 import org.apache.calcite.sql.util.IdPair;
@@ -56,6 +57,7 @@ import org.hamcrest.Matcher;
 import org.hamcrest.StringDescription;
 import org.hamcrest.TypeSafeMatcher;
 import org.junit.jupiter.api.Test;
+import org.locationtech.jts.util.Assert;
 
 import java.io.PrintWriter;
 import java.io.Serializable;
@@ -237,6 +239,45 @@ class UtilTest {
     assertThatScientific("-Infinity", is("-Infinity"));
     assertThatScientific("NaN", is("NaN"));
     assertThatScientific("-0.0", is("-0.0E0"));
+  }
+
+  @Test void testRightPad() {
+    assertThat(Util.rightPad("a", 1, 'x'), is("a"));
+    assertThat(Util.rightPad("a", 2, 'x'), is("ax"));
+    assertThat(Util.rightPad("a", 4, 'x'), is("axxx"));
+    assertThat(Util.rightPad("", 3, 'x'), is("xxx"));
+  }
+
+  @Test void testJoinNullable() {
+    final List<@Nullable Object> parts = Arrays.asList("a", null, "b");
+    assertThat(Util.joinNullable(parts, ":"), is("a::b"));
+    assertThat(Util.joinNullable(Collections.emptyList(), ","), is(""));
+    assertThat(Util.joinNullable(Arrays.asList(null, null), ":"), is(":"));
+  }
+
+  @Test void testReplaceChars() {
+    assertNull(Util.replaceChars((String) null, "ab", "x"));
+    assertThat(Util.replaceChars("", "ab", "x"), is(""));
+
+    final String s = "abc";
+    assertThat(Util.replaceChars(s, null, "x"), sameInstance(s));
+    assertThat(Util.replaceChars(s, "", "x"), sameInstance(s));
+    assertThat(Util.replaceChars(s, "x", "y"), sameInstance(s));
+
+    assertThat(Util.replaceChars("abc", "ab", null), is("c"));
+    assertThat(Util.replaceChars("abc", "abc", "12"), is("12"));
+    assertThat(Util.replaceChars("abc", "a", "a"), is("abc"));
+    assertNotSame("abc", Util.replaceChars("abc", "a", "a"));
+  }
+
+  @Test void testReplaceIgnoreCase() {
+    final String s = "abc";
+    assertThat(Util.replaceIgnoreCase(s, "", "x"), sameInstance(s));
+    assertThat(Util.replaceIgnoreCase(s, "ZZ", "x"), sameInstance(s));
+
+    assertThat(Util.replaceIgnoreCase("aBAba", "ab", "x"), is("xxa"));
+    assertThat(Util.replaceIgnoreCase("xxxx", "X", "yz"), is("yzyzyzyz"));
+    assertThat(Util.replaceIgnoreCase("aaaa", "aa", "b"), is("bb"));
   }
 
   @Test void testToJavaId() throws UnsupportedEncodingException {
@@ -2959,6 +3000,16 @@ class UtilTest {
     assertThat(s2, instanceOf(NlsString.class));
     assertThat(s2, not(sameInstance((Object) s)));
     assertThat(s2, hasToString(s.toString()));
+  }
+
+  @Test void testCollationEncoding() {
+    SqlCollation collation =
+        new SqlCollation(
+            SqlCollation.Coercibility.COERCIBLE, Locale.ENGLISH,
+            Util.getDefaultCharset(), "primary");
+    SqlNodeList list = collation.asList();
+    SqlCollation decoded = SqlCollation.fromSqlList(list);
+    Assert.equals(collation, decoded);
   }
 
   @Test void testXmlOutput() {

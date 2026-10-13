@@ -473,7 +473,7 @@ public abstract class SqlOperator {
    * Validates a call to this operator.
    *
    * <p>This method should not perform type-derivation or perform validation
-   * related related to types. That is done later, by
+   * related to types. That is done later, by
    * {@link #deriveType(SqlValidator, SqlValidatorScope, SqlCall)}. This method
    * should focus on structural validation.
    *
@@ -561,9 +561,10 @@ public abstract class SqlOperator {
     if (returnTypeInference != null) {
       RelDataType returnType = returnTypeInference.inferReturnType(opBinding);
       if (returnType == null) {
-        throw new IllegalArgumentException("Cannot infer return type for "
-            + opBinding.getOperator() + "; operand types: "
-            + opBinding.collectOperandTypes());
+        throw opBinding.newError(
+            RESOURCE.cannotInferReturnType(
+                opBinding.getOperator().toString(),
+                opBinding.collectOperandTypes().toString()));
       }
 
       if (operandTypeInference != null
@@ -1034,6 +1035,27 @@ public abstract class SqlOperator {
   @Pure
   public @Nullable Supplier<Strong.Policy> getStrongPolicyInference() {
     return null;
+  }
+
+  /**
+   * Returns whether this is a safe operator.
+   *
+   * <p>If an operator is safe, then it never causes a run-time exception.
+   *
+   * <p>For example, the {@code a/b} is not safe. Because the
+   * {@code SqlStdOperatorTable.DIVIDE} may throw the exception when dividing by zero.
+   *
+   * <p>By default, returns {@code false}, which means the operator is not safe.
+   *
+   * <p>If an operator is safe, then some optimizations can be performed in
+   * {@code org.apache.calcite.rex.RexSimplify}.
+   *
+   * <p>For example:
+   * {@code NULL + a} can be optimized to {@code NULL}.
+   *
+   */
+  public Boolean isSafeOperator() {
+    return false;
   }
 
   /**

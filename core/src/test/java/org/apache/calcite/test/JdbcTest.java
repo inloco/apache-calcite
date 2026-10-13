@@ -116,6 +116,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.File;
 import java.io.IOException;
@@ -990,7 +991,7 @@ public class JdbcTest {
     final int driverMajor = metaData.getDriverMajorVersion();
     final int driverMinor = metaData.getDriverMinorVersion();
     assertThat(driverMajor, is(1));
-    assertThat(driverMinor, is(40));
+    assertThat(driverMinor, is(42));
 
     assertThat(metaData.getDatabaseProductName(), is("Calcite"));
     final String databaseVersion =
@@ -2904,10 +2905,10 @@ public class JdbcTest {
         + " then 'y' else null end)) T\n"
         + "from \"hr\".\"emps\"";
     final String plan = ""
-        + "      String case_when_value;\n"
+        + "              String case_when_value;\n"
         + "              final org.apache.calcite.test.schemata.hr.Employee current = (org.apache"
         + ".calcite.test.schemata.hr.Employee) inputEnumerator.current();\n"
-        + "              if (current.empid > current.deptno * 10) {\n"
+        + "              if (org.apache.calcite.runtime.SqlFunctions.toInt(org.apache.calcite.linq4j.tree.Primitive.integerCast(org.apache.calcite.linq4j.tree.Primitive.INT, current.empid, java.math.RoundingMode.DOWN)) > current.deptno * 10) {\n"
         + "                case_when_value = \"y\";\n"
         + "              } else {\n"
         + "                case_when_value = null;\n"
@@ -2928,10 +2929,10 @@ public class JdbcTest {
         + " then \"name\" end)) T\n"
         + "from \"hr\".\"emps\"";
     final String plan = ""
-        + "      String case_when_value;\n"
+        + "              String case_when_value;\n"
         + "              final org.apache.calcite.test.schemata.hr.Employee current = (org.apache"
         + ".calcite.test.schemata.hr.Employee) inputEnumerator.current();\n"
-        + "              if (current.empid > current.deptno * 10) {\n"
+        + "              if (org.apache.calcite.runtime.SqlFunctions.toInt(org.apache.calcite.linq4j.tree.Primitive.integerCast(org.apache.calcite.linq4j.tree.Primitive.INT, current.empid, java.math.RoundingMode.DOWN)) > current.deptno * 10) {\n"
         + "                case_when_value = current.name;\n"
         + "              } else {\n"
         + "                case_when_value = null;\n"
@@ -3442,15 +3443,15 @@ public class JdbcTest {
             + "LogicalProject(deptno=[$0], name=[$1], employees=[$2], location=[$3])\n"
             + "  LogicalFilter(condition=[IN($0, {\n"
             + "LogicalProject(deptno=[$1])\n"
-            + "  LogicalFilter(condition=[<($0, 150)])\n"
+            + "  LogicalFilter(condition=[<(CAST($0):INTEGER NOT NULL, 150)])\n"
             + "    LogicalTableScan(table=[[hr, emps]])\n"
             + "})])\n"
-            + "    LogicalTableScan(table=[[hr, depts]])")
+            + "    LogicalTableScan(table=[[hr, depts]])\n")
         .explainContains(""
             + "EnumerableHashJoin(condition=[=($0, $5)], joinType=[semi])\n"
             + "  EnumerableTableScan(table=[[hr, depts]])\n"
-            + "  EnumerableCalc(expr#0..4=[{inputs}], expr#5=[150], expr#6=[<($t0, $t5)], proj#0..4=[{exprs}], $condition=[$t6])\n"
-            + "    EnumerableTableScan(table=[[hr, emps]])")
+            + "  EnumerableCalc(expr#0..4=[{inputs}], expr#5=[CAST($t0):INTEGER NOT NULL], expr#6=[150], expr#7=[<($t5, $t6)], proj#0..4=[{exprs}], $condition=[$t7])\n"
+            + "    EnumerableTableScan(table=[[hr, emps]])\n\n")
         .returnsUnordered(
             "deptno=10; name=Sales; employees=[{100, 10, Bill, 10000.0, 1000}, {150, 10, Sebastian, 7000.0, null}]; location={-122, 38}");
   }
@@ -4143,33 +4144,6 @@ public class JdbcTest {
         .returnsUnordered("empid=150; name=Sebastian");
   }
 
-  /**
-   * Test case of
-   * <a href="https://issues.apache.org/jira/browse/CALCITE-6893">[CALCITE-6893]
-   * Remove agg from Union children in IntersectToDistinctRule</a>. */
-  @Test void testIntersectToDistinct() {
-    final String sql = ""
-        + "select \"empid\", \"name\" from \"hr\".\"emps\" where \"deptno\"=10\n"
-        + "intersect\n"
-        + "select \"empid\", \"name\" from \"hr\".\"emps\" where \"empid\">=150";
-    final String[] returns = new String[] {
-        "empid=150; name=Sebastian"};
-
-    CalciteAssert.hr()
-        .query(sql)
-        .explainContains("EnumerableIntersect")
-        .returnsUnordered(returns);
-
-    CalciteAssert.hr()
-        .query(sql)
-        .withHook(Hook.PLANNER, (Consumer<RelOptPlanner>)
-            p -> {
-              p.removeRule(EnumerableRules.ENUMERABLE_INTERSECT_RULE);
-            })
-        .explainContains("EnumerableUnion(all=[true])")
-        .returnsUnordered(returns);
-  }
-
   /** Test case for
    * <a href="https://issues.apache.org/jira/browse/CALCITE-6904">[CALCITE-6904]
    * IS_NOT_DISTINCT_FROM is converted error in EnumerableJoinRule</a>. */
@@ -4181,7 +4155,7 @@ public class JdbcTest {
         + "on \"t1\".\"commission\" is not distinct from \"t2\".\"commission\"";
     CalciteAssert.hr()
         .query(sql)
-        .explainContains("NestedLoopJoin(condition=[IS NOT DISTINCT FROM($0, $1)]")
+        .explainContains("HashJoin(condition=[IS NOT DISTINCT FROM($0, $1)]")
         .returnsUnordered("commission=1000",
             "commission=250",
             "commission=500",
@@ -4267,12 +4241,11 @@ public class JdbcTest {
             + "    EnumerableCalc(expr#0..2=[{inputs}], expr#3=[0], expr#4=[=($t2, $t3)], "
             + "expr#5=[1], expr#6=[=($t2, $t5)], proj#0..1=[{exprs}], $f2=[$t4], $f3=[$t6])\n"
             + "      EnumerableUnion(all=[true])\n"
-            + "        EnumerableCalc(expr#0..4=[{inputs}], expr#5=[0], expr#6=[CAST($t1):INTEGER"
-            + " NOT NULL], expr#7=[10], expr#8=[=($t6, $t7)], empid=[$t0], name=[$t2], $f2=[$t5],"
-            + " $condition=[$t8])\n"
+            + "        EnumerableCalc(expr#0..4=[{inputs}], expr#5=[0], expr#6=[CAST($t1):INTEGER NOT NULL], expr#7=[10], expr#8=[=($t6, $t7)], empid=[$t0], name=[$t2], $f2=[$t5], "
+            + "$condition=[$t8])\n"
             + "          EnumerableTableScan(table=[[hr, emps]])\n"
-            + "        EnumerableCalc(expr#0..4=[{inputs}], expr#5=[1], expr#6=[150], expr#7=[>="
-            + "($t0, $t6)], empid=[$t0], name=[$t2], $f2=[$t5], $condition=[$t7])\n"
+            + "        EnumerableCalc(expr#0..4=[{inputs}], expr#5=[1], expr#6=[CAST($t0):INTEGER NOT NULL], expr#7=[150], expr#8=[>="
+            + "($t6, $t7)], empid=[$t0], name=[$t2], $f2=[$t5], $condition=[$t8])\n"
             + "          EnumerableTableScan(table=[[hr, emps]])\n")
         .returnsUnordered("empid=100; name=Bill",
             "empid=110; name=Theodore");
@@ -4327,7 +4300,7 @@ public class JdbcTest {
         .explainContains(""
             + "PLAN=EnumerableCalc(expr#0..1=[{inputs}], expr#2=[0], expr#3=[=($t0, $t2)], expr#4=[null:JavaType(class java.lang.Integer)], expr#5=[CASE($t3, $t4, $t1)], expr#6=[/($t5, $t0)], expr#7=[CAST($t6):JavaType(class java.lang.Integer)], CS=[$t0], C=[$t0], S=[$t5], A=[$t7])\n"
             + "  EnumerableAggregate(group=[{}], CS=[COUNT()], S=[$SUM0($1)])\n"
-            + "    EnumerableCalc(expr#0..4=[{inputs}], expr#5=[0], expr#6=[<($t1, $t5)], proj#0..4=[{exprs}], $condition=[$t6])\n"
+            + "    EnumerableCalc(expr#0..4=[{inputs}], expr#5=[CAST($t1):INTEGER NOT NULL], expr#6=[0], expr#7=[<($t5, $t6)], proj#0..4=[{exprs}], $condition=[$t7])\n"
             + "      EnumerableTableScan(table=[[hr, emps]])\n")
         .returns("CS=0; C=0; S=null; A=null\n");
   }
@@ -4343,7 +4316,7 @@ public class JdbcTest {
         .explainContains(""
             + "PLAN=EnumerableCalc(expr#0=[{inputs}], CS=[$t0], CS2=[$t0])\n"
             + "  EnumerableAggregate(group=[{}], CS=[COUNT()])\n"
-            + "    EnumerableCalc(expr#0..4=[{inputs}], expr#5=[0], expr#6=[<($t1, $t5)], proj#0..4=[{exprs}], $condition=[$t6])\n"
+            + "    EnumerableCalc(expr#0..4=[{inputs}], expr#5=[CAST($t1):INTEGER NOT NULL], expr#6=[0], expr#7=[<($t5, $t6)], proj#0..4=[{exprs}], $condition=[$t7])\n"
             + "      EnumerableTableScan(table=[[hr, emps]])\n")
         .returns("CS=0; CS2=0\n");
   }
@@ -5242,7 +5215,7 @@ public class JdbcTest {
               + "where \"empid\" > 10")
           .convertContains(""
               + "LogicalProject(name=[$2], EXPR$1=[+(COUNT($3) OVER (PARTITION BY $1), 1)])\n"
-              + "  LogicalFilter(condition=[>($0, 10)])\n"
+              + "  LogicalFilter(condition=[>(CAST($0):INTEGER NOT NULL, 10)])\n"
               + "    LogicalProject(empid=[$0], deptno=[$1], name=[$2], commission=[$4])\n"
               + "      LogicalTableScan(table=[[hr, emps]])\n");
     }
@@ -6568,6 +6541,17 @@ public class JdbcTest {
               is("TABLE_SCHEM=adhoc; TABLE_CATALOG=null\n"));
         }
 
+        // schemas (qualified, non-existent)
+        try (ResultSet r = metaData.getSchemas(null, "nonexistent")) {
+          assertThat(CalciteAssert.toString(r), is(""));
+        }
+
+        // schemas (qualified, missing)
+        try (ResultSet r = metaData.getSchemas(null, "adho%")) {
+          assertThat(CalciteAssert.toString(r),
+              is("TABLE_SCHEM=adhoc; TABLE_CATALOG=null\n"));
+        }
+
         // table types
         try (ResultSet r = metaData.getTableTypes()) {
           assertThat(CalciteAssert.toString(r),
@@ -6612,7 +6596,7 @@ public class JdbcTest {
         .explainMatches(" without implementation ",
             checkResult("PLAN="
                 + "LogicalProject(empid=[$0], deptno=[$1])\n"
-                + "  LogicalFilter(condition=[>($1, 10)])\n"
+                + "  LogicalFilter(condition=[>(CAST($1):INTEGER NOT NULL, 10)])\n"
                 + "    LogicalProject(empid=[$0], deptno=[$1])\n"
                 + "      LogicalTableScan(table=[[adhoc, EMPLOYEES]])\n\n"));
     with.query("select * from \"adhoc\".\"EMPLOYEES\" where exists (select * from \"adhoc\".V)")
@@ -6668,7 +6652,7 @@ public class JdbcTest {
             checkResult("PLAN="
                 + "LogicalProject(empid=[$0], deptno=[$1], name=[$2], "
                 + "salary=[$3], commission=[$4])\n"
-                + "  LogicalFilter(condition=[>($1, 10)])\n"
+                + "  LogicalFilter(condition=[>(CAST($1):INTEGER NOT NULL, 10)])\n"
                 + "    LogicalSort(sort0=[$1], dir0=[ASC])\n"
                 + "      LogicalProject(empid=[$0], deptno=[$1], name=[$2], "
                 + "salary=[$3], commission=[$4])\n"
@@ -6681,7 +6665,7 @@ public class JdbcTest {
             checkResult("PLAN="
                 + "LogicalProject(empid=[$0], deptno=[$1], name=[$2], "
                 + "salary=[$3], commission=[$4])\n"
-                + "  LogicalFilter(condition=[>($1, 10)])\n"
+                + "  LogicalFilter(condition=[>(CAST($1):INTEGER NOT NULL, 10)])\n"
                 + "    LogicalSort(sort0=[$1], dir0=[ASC])\n"
                 + "      LogicalProject(empid=[$0], deptno=[$1], name=[$2], salary=[$3], "
                 + "commission=[$4])\n"
@@ -8169,6 +8153,42 @@ public class JdbcTest {
 
   /**
    * Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-4993">[CALCITE-4993]
+   * Simplify EQUALS or NOT-EQUALS with other number comparison</a>.
+   */
+  @Test void testJavaTypeSimplifyEqWithOtherNumberComparison() {
+    CalciteAssert.hr()
+        .query("select \"empid\", \"deptno\" from \"hr\".\"emps\"\n"
+            + "where \"empid\" <> 5 and \"empid\"> 3 and \"empid\"< 10")
+        .explainContains(""
+            + "PLAN=EnumerableCalc(expr#0..4=[{inputs}], expr#5=[CAST($t0):INTEGER NOT NULL], expr#6=[Sarg[(3..5), (5..10)]], expr#7=[SEARCH($t5, $t6)], "
+            + "proj#0..1=[{exprs}], $condition=[$t7])\n"
+            + "  EnumerableTableScan(table=[[hr, emps]])\n\n")
+        .returns("");
+  }
+
+  @Test void testJavaTypeSimplifyEqWithOtherNumberComparison2() {
+    CalciteAssert.hr()
+        .query("select \"empid\", \"deptno\" from \"hr\".\"emps\"\n"
+            + "where \"empid\" = 5 and \"empid\"> 3 and \"empid\"< 10")
+        .explainContains(""
+            + "PLAN=EnumerableCalc(expr#0..4=[{inputs}], expr#5=[CAST($t0):INTEGER NOT NULL], expr#6=[5], expr#7=[=($t5, $t6)], "
+            + "proj#0..1=[{exprs}], $condition=[$t7])\n"
+            + "  EnumerableTableScan(table=[[hr, emps]])\n\n")
+        .returns("");
+  }
+
+  @Test void testJavaTypeSimplifyEqWithOtherNumberComparison3() {
+    CalciteAssert.hr()
+        .query("select \"empid\", \"deptno\" from \"hr\".\"emps\"\n"
+            + "where \"empid\" = 5 and \"empid\"> 6 and \"empid\"< 10")
+        .explainContains(""
+            + "PLAN=EnumerableValues(tuples=[[]])\n\n")
+        .returns("");
+  }
+
+  /**
+   * Test case for
    * <a href="https://issues.apache.org/jira/browse/CALCITE-596">[CALCITE-596]
    * JDBC adapter incorrectly reads null values as 0</a>.
    */
@@ -9062,6 +9082,39 @@ public class JdbcTest {
         });
   }
 
+  /** Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-5094">[CALCITE-5094]
+   * Calcite JDBC Adapter and Avatica should support
+   * MySQL UNSIGNED types of TINYINT, SMALLINT, INT, BIGINT</a>. */
+  @Test void testMySQLUnsignedType() {
+    CalciteAssert.that()
+        .with(CalciteAssert.SchemaSpec.UNSIGNED_TYPE)
+        .with(Lex.MYSQL)
+        .query("SELECT * FROM test_unsigned WHERE utiny_value = ? "
+            + "AND usmall_value = ? AND uint_value = ? AND ubig_value = ?")
+        .consumesPreparedStatement(p -> {
+          p.setInt(1, 255);
+          p.setInt(2, 65535);
+          p.setLong(3, 4294967295L);
+          p.setBigDecimal(4, new BigDecimal("18446744073709551615"));
+        })
+        .returns(resultSet -> {
+          try {
+            assertTrue(resultSet.next());
+            final Integer uTinyInt = resultSet.getInt(1);
+            final Integer uSmallInt = resultSet.getInt(2);
+            final Long uInteger = resultSet.getLong(3);
+            final BigDecimal uBigInt = resultSet.getBigDecimal(4);
+            assertThat(uTinyInt, is(255));
+            assertThat(uSmallInt, is(65535));
+            assertThat(uInteger, is(4294967295L));
+            assertThat(uBigInt, is(new BigDecimal("18446744073709551615")));
+          } catch (SQLException e) {
+            throw TestUtil.rethrow(e);
+          }
+        });
+  }
+
   @Test void bindByteParameter() {
     for (SqlTypeName tpe : SqlTypeName.INT_TYPES) {
       final String sql =
@@ -9179,6 +9232,34 @@ public class JdbcTest {
           p.setLong(1, 100);
         })
         .returnsUnordered("EMPID=100");
+  }
+
+  @ValueSource(strings = {"a", "a ", "a a"})
+  @ParameterizedTest void bindCharParameter(String value) {
+    final String sql =
+        "with cte as (select cast('a' as char(2)) as empid)"
+            + "select * from cte where empid = ?";
+
+    CalciteAssert.hr()
+        .query(sql)
+        .consumesPreparedStatement(p -> {
+          p.setString(1, value);
+        })
+        .returnsUnordered("EMPID=a ");
+  }
+
+  @ValueSource(strings = {"aa", "aaa"})
+  @ParameterizedTest void bindVarcharParameter(String value) {
+    final String sql =
+        "with cte as (select cast('aa' as varchar(2)) as empid)"
+            + "select * from cte where empid = ?";
+
+    CalciteAssert.hr()
+        .query(sql)
+        .consumesPreparedStatement(p -> {
+          p.setString(1, value);
+        })
+        .returnsUnordered("EMPID=aa");
   }
 
   private static String sums(int n, boolean c) {

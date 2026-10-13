@@ -17,6 +17,7 @@
 package org.apache.calcite.sql.fun;
 
 import org.apache.calcite.avatica.util.TimeUnit;
+import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.sql.SqlAggFunction;
 import org.apache.calcite.sql.SqlAsOperator;
 import org.apache.calcite.sql.SqlBasicCall;
@@ -86,6 +87,7 @@ import java.util.function.Consumer;
 import java.util.function.Supplier;
 
 import static org.apache.calcite.linq4j.Nullness.castNonNull;
+import static org.apache.calcite.util.Static.RESOURCE;
 
 import static java.util.Objects.requireNonNull;
 
@@ -273,9 +275,14 @@ public class SqlStdOperatorTable extends ReflectiveSqlOperatorTable {
                 typeToTransform.getSqlTypeName().getFamily() == SqlTypeFamily.ARRAY
                     ? ReturnTypes.LEAST_RESTRICTIVE
                     : ReturnTypes.DYADIC_STRING_SUM_PRECISION_NULLABLE;
-
-            return requireNonNull(returnType.inferReturnType(opBinding),
-                "inferred CONCAT element type");
+            RelDataType type = returnType.inferReturnType(opBinding);
+            if (type == null) {
+              throw opBinding.newError(
+                  RESOURCE.cannotInferReturnType(
+                      opBinding.getOperator().toString(),
+                      opBinding.collectOperandTypes().toString()));
+            }
+            return type;
           }),
           null,
           OperandTypes.STRING_SAME_SAME_OR_ARRAY_SAME_SAME);
@@ -1016,7 +1023,7 @@ public class SqlStdOperatorTable extends ReflectiveSqlOperatorTable {
           80,
           ReturnTypes.ARG0,
           InferTypes.RETURN_TYPE,
-          OperandTypes.NUMERIC_OR_INTERVAL);
+          OperandTypes.SIGNED_OR_INTERVAL);
 
   /**
    * Checked version of prefix arithmetic minus operator, '<code>-</code>'.
@@ -1300,6 +1307,37 @@ public class SqlStdOperatorTable extends ReflectiveSqlOperatorTable {
           OperandTypes.INTEGER_INTEGER.or(OperandTypes.BINARY_BINARY));
 
   /**
+   * <code>{@code ^}</code> operator.
+   */
+  public static final SqlBinaryOperator BITXOR_OPERATOR =
+      new SqlBinaryOperator(
+          "^",
+          SqlKind.BITXOR,
+          40,
+          true,
+          ReturnTypes.LARGEST_INT_OR_FIRST_NON_NULL,
+          InferTypes.FIRST_KNOWN,
+          OperandTypes.INTEGER_INTEGER.or(OperandTypes.BINARY_BINARY)
+              .or(OperandTypes.UNSIGNED_NUMERIC_UNSIGNED_NUMERIC));
+  // Both operands should support bitwise operations
+
+  /**
+   * <code>{@code &}</code> operator.
+   */
+  public static final SqlBinaryOperator BITAND_OPERATOR =
+      new SqlBinaryOperator(
+          "&",
+          SqlKind.BITAND,
+          50,        // Higher precedence than XOR but lower than multiplication
+          true,
+          ReturnTypes.LEAST_RESTRICTIVE,
+          InferTypes.FIRST_KNOWN,
+          OperandTypes.INTEGER_INTEGER.or(OperandTypes.BINARY_BINARY)
+              .or(OperandTypes.UNSIGNED_NUMERIC_UNSIGNED_NUMERIC)
+              .or(OperandTypes.family(SqlTypeFamily.UNSIGNED_NUMERIC, SqlTypeFamily.INTEGER)
+                  .or(OperandTypes.family(SqlTypeFamily.INTEGER, SqlTypeFamily.UNSIGNED_NUMERIC))));
+
+  /**
    * <code>BITNOT</code> scalar function.
    */
   public static final SqlFunction BITNOT =
@@ -1324,6 +1362,35 @@ public class SqlStdOperatorTable extends ReflectiveSqlOperatorTable {
    */
   public static final SqlAggFunction BIT_XOR =
       new SqlBitOpAggFunction(SqlKind.BIT_XOR);
+
+  /**
+   * <code>{@code <<}</code> (left shift) operator.
+   */
+  public static final SqlBinaryOperator BIT_LEFT_SHIFT =
+      new SqlBinaryOperator(
+          "<<",
+          SqlKind.OTHER,
+          32,                                     // Standard shift operator precedence
+          true,
+          ReturnTypes.ARG0_NULLABLE,
+          InferTypes.FIRST_KNOWN,
+          OperandTypes.or(
+              OperandTypes.family(SqlTypeFamily.INTEGER, SqlTypeFamily.INTEGER),
+              OperandTypes.family(SqlTypeFamily.BINARY, SqlTypeFamily.INTEGER),
+              OperandTypes.family(SqlTypeFamily.UNSIGNED_NUMERIC, SqlTypeFamily.INTEGER)));
+
+  /**
+   * left shift function.
+   */
+  public static final SqlFunction LEFTSHIFT =
+      SqlBasicFunction.create(
+          "LEFTSHIFT",
+          SqlKind.OTHER_FUNCTION,
+          ReturnTypes.ARG0_NULLABLE,
+          OperandTypes.or(
+              OperandTypes.family(SqlTypeFamily.INTEGER, SqlTypeFamily.INTEGER),
+              OperandTypes.family(SqlTypeFamily.BINARY, SqlTypeFamily.INTEGER),
+              OperandTypes.family(SqlTypeFamily.UNSIGNED_NUMERIC, SqlTypeFamily.INTEGER)));
 
   //-------------------------------------------------------------
   // WINDOW Aggregate Functions
@@ -2245,6 +2312,11 @@ public class SqlStdOperatorTable extends ReflectiveSqlOperatorTable {
       new SqlItemOperator("ITEM", OperandTypes.ARRAY_OR_MAP_OR_VARIANT, 1, true);
 
   /**
+   * Colon operator, '<code>:</code>', used for variant path access.
+   */
+  public static final SqlOperator COLON = new SqlColonOperator();
+
+  /**
    * The ARRAY Value Constructor. e.g. "<code>ARRAY[1, 2, 3]</code>".
    */
   public static final SqlArrayValueConstructor ARRAY_VALUE_CONSTRUCTOR =
@@ -2324,7 +2396,7 @@ public class SqlStdOperatorTable extends ReflectiveSqlOperatorTable {
       new SqlInternalOperator(
           "$SCALAR_QUERY",
           SqlKind.SCALAR_QUERY,
-          0,
+          100, // High precedence to prevent SqlCall from adding extra parentheses
           false,
           ReturnTypes.RECORD_TO_SCALAR,
           null,
@@ -2334,9 +2406,15 @@ public class SqlStdOperatorTable extends ReflectiveSqlOperatorTable {
             SqlCall call,
             int leftPrec,
             int rightPrec) {
-          final SqlWriter.Frame frame = writer.startList("(", ")");
-          call.operand(0).unparse(writer, 0, 0);
-          writer.endList(frame);
+          final SqlNode operand = call.operand(0);
+          if (operand.getKind() == SqlKind.SELECT) {
+            operand.unparse(writer, leftPrec, rightPrec);
+          } else {
+            final SqlWriter.Frame frame =
+                writer.startList(SqlWriter.FrameTypeEnum.SUB_QUERY, "(", ")");
+            operand.unparse(writer, 0, 0);
+            writer.endList(frame);
+          }
         }
 
         @Override public boolean argumentMustBeScalar(int ordinal) {

@@ -40,6 +40,7 @@ import org.apache.calcite.rel.core.TableModify;
 import org.apache.calcite.rel.core.TableScan;
 import org.apache.calcite.rel.core.Union;
 import org.apache.calcite.rel.core.Values;
+import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rex.RexBuilder;
 import org.apache.calcite.rex.RexCall;
 import org.apache.calcite.rex.RexExecutor;
@@ -54,6 +55,7 @@ import org.apache.calcite.rex.RexVisitorImpl;
 import org.apache.calcite.sql.SqlKind;
 import org.apache.calcite.sql.fun.SqlInternalOperators;
 import org.apache.calcite.sql.fun.SqlStdOperatorTable;
+import org.apache.calcite.sql.type.SqlTypeUtil;
 import org.apache.calcite.util.BitSets;
 import org.apache.calcite.util.Bug;
 import org.apache.calcite.util.ImmutableBitSet;
@@ -318,12 +320,11 @@ public class RelMdPredicates
     final RelNode input = filter.getInput();
     final RexBuilder rexBuilder = filter.getCluster().getRexBuilder();
     final RelOptPredicateList inputInfo = mq.getPulledUpPredicates(input);
-
+    List<RexNode> predicates =
+        RexUtil.retainDeterministic(RelOptUtil.conjunctions(filter.getCondition()));
     return Util.first(inputInfo, RelOptPredicateList.EMPTY)
         .union(rexBuilder,
-            RelOptPredicateList.of(rexBuilder,
-                RexUtil.retainDeterministic(
-                    RelOptUtil.conjunctions(filter.getCondition()))));
+            RelOptPredicateList.of(rexBuilder, predicates));
   }
 
   /**
@@ -600,21 +601,26 @@ public class RelMdPredicates
                 eqConstant(values, rexBuilder, i, rexLiteral));
           }
         } else {
-          RexUnknownAs rexUnknownAs = RexUnknownAs.UNKNOWN;
-          RangeSet<Comparable> rangeSet = TreeRangeSet.create();
-          for (RexLiteral rexLiteral : rexLiteralSet) {
-            if (RexUtil.isNull(rexLiteral)) {
-              rexUnknownAs = RexUnknownAs.TRUE;
-              continue;
+          final RelDataType type = values.getRowType().getFieldList().get(i).getType();
+          if (!type.isStruct()
+              && !SqlTypeUtil.isCollection(type)
+              && !SqlTypeUtil.isMap(type)) {
+            RexUnknownAs rexUnknownAs = RexUnknownAs.UNKNOWN;
+            RangeSet<Comparable> rangeSet = TreeRangeSet.create();
+            for (RexLiteral rexLiteral : rexLiteralSet) {
+              if (RexUtil.isNull(rexLiteral)) {
+                rexUnknownAs = RexUnknownAs.TRUE;
+                continue;
+              }
+              rangeSet.add(
+                  Range.singleton(requireNonNull(rexLiteral.getValueAs(Comparable.class))));
             }
-            rangeSet.add(Range.singleton(requireNonNull(rexLiteral.getValueAs(Comparable.class))));
+            final Sarg sarg = Sarg.of(rexUnknownAs, rangeSet);
+            predicates.add(
+                i, rexBuilder.makeCall(SqlStdOperatorTable.SEARCH,
+                    rexBuilder.makeInputRef(values, i),
+                    rexBuilder.makeSearchArgumentLiteral(sarg, type)));
           }
-          final Sarg sarg = Sarg.of(rexUnknownAs, rangeSet);
-          predicates.add(
-              i, rexBuilder.makeCall(SqlStdOperatorTable.SEARCH,
-                  rexBuilder.makeInputRef(values, i),
-                  rexBuilder.makeSearchArgumentLiteral(sarg,
-                      values.getRowType().getFieldList().get(i).getType())));
         }
       }
       return RelOptPredicateList.of(rexBuilder, predicates);
@@ -711,30 +717,55 @@ public class RelMdPredicates
         Mappings.TargetMapping leftMapping =
             Mappings.createShiftMapping(nSysFields + nFieldsLeft, nSysFields, 0,
                 nFieldsLeft);
-        leftChildPredicates =
+        RexNode lcp =
             leftPredicates.accept(
                 new RexPermuteInputsShuttle(leftMapping, joinRel.getInput(0)));
+        leftChildPredicates = lcp;
 
-        allExprs.add(leftChildPredicates);
-        for (RexNode r : RelOptUtil.conjunctions(leftChildPredicates)) {
-          exprFields.put(r, RelOptUtil.InputFinder.bits(r));
-          allExprs.add(r);
+        if (lcp != null) {
+          allExprs.add(lcp);
+          for (RexNode r : RelOptUtil.conjunctions(lcp)) {
+            exprFields.put(r, RelOptUtil.InputFinder.bits(r));
+            allExprs.add(r);
+          }
+          RexNode simplified =
+              simplify.simplifyFilterPredicates(RelOptUtil.conjunctions(lcp));
+          if (simplified != null && !simplified.equals(lcp)) {
+            allExprs.add(simplified);
+            for (RexNode r : RelOptUtil.conjunctions(simplified)) {
+              exprFields.put(r, RelOptUtil.InputFinder.bits(r));
+              allExprs.add(r);
+            }
+          }
         }
       }
+
       if (rightPredicates == null) {
         rightChildPredicates = null;
       } else {
         Mappings.TargetMapping rightMapping =
             Mappings.createShiftMapping(nSysFields + nFieldsLeft + nFieldsRight,
                 nSysFields + nFieldsLeft, 0, nFieldsRight);
-        rightChildPredicates =
+        RexNode rcp =
             rightPredicates.accept(
                 new RexPermuteInputsShuttle(rightMapping, joinRel.getInput(1)));
+        rightChildPredicates = rcp;
 
-        allExprs.add(rightChildPredicates);
-        for (RexNode r : RelOptUtil.conjunctions(rightChildPredicates)) {
-          exprFields.put(r, RelOptUtil.InputFinder.bits(r));
-          allExprs.add(r);
+        if (rcp != null) {
+          allExprs.add(rcp);
+          for (RexNode r : RelOptUtil.conjunctions(rcp)) {
+            exprFields.put(r, RelOptUtil.InputFinder.bits(r));
+            allExprs.add(r);
+          }
+          RexNode simplified =
+              simplify.simplifyFilterPredicates(RelOptUtil.conjunctions(rcp));
+          if (simplified != null && !simplified.equals(rcp)) {
+            allExprs.add(simplified);
+            for (RexNode r : RelOptUtil.conjunctions(simplified)) {
+              exprFields.put(r, RelOptUtil.InputFinder.bits(r));
+              allExprs.add(r);
+            }
+          }
         }
       }
 
@@ -865,7 +896,20 @@ public class RelMdPredicates
     private void infer(@Nullable RexNode predicates, Set<RexNode> allExprs,
         List<RexNode> inferredPredicates, boolean includeEqualityInference,
         ImmutableBitSet inferringFields) {
-      for (RexNode r : RelOptUtil.conjunctions(predicates)) {
+      if (predicates == null) {
+        return;
+      }
+
+      // Normalize predicates by simplification to ensure consistent deduplication.
+      // Prevents infinite loops when semantically equivalent predicates are simplified
+      // to different forms (e.g., AND(>=, <=) to SEARCH).
+      RexNode normalizedPredicates =
+          simplify.simplifyFilterPredicates(RelOptUtil.conjunctions(predicates));
+      if (normalizedPredicates == null) {
+        return;
+      }
+
+      for (RexNode r : RelOptUtil.conjunctions(normalizedPredicates)) {
         if (!includeEqualityInference
             && equalityPredicates.contains(r)) {
           continue;

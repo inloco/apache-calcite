@@ -19,11 +19,11 @@ package org.apache.calcite.sql2rel;
 import org.apache.calcite.linq4j.Ord;
 import org.apache.calcite.plan.RelOptCluster;
 import org.apache.calcite.plan.RelOptUtil;
+import org.apache.calcite.plan.RelOptUtil.RexCorrelVariableMapShuttle;
 import org.apache.calcite.rel.RelCollation;
 import org.apache.calcite.rel.RelCollations;
 import org.apache.calcite.rel.RelDistribution;
 import org.apache.calcite.rel.RelFieldCollation;
-import org.apache.calcite.rel.RelHomogeneousShuttle;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.core.Aggregate;
 import org.apache.calcite.rel.core.AggregateCall;
@@ -58,11 +58,9 @@ import org.apache.calcite.rex.RexLiteral;
 import org.apache.calcite.rex.RexNode;
 import org.apache.calcite.rex.RexPermuteInputsShuttle;
 import org.apache.calcite.rex.RexProgram;
-import org.apache.calcite.rex.RexShuttle;
 import org.apache.calcite.rex.RexSubQuery;
 import org.apache.calcite.rex.RexUtil;
 import org.apache.calcite.rex.RexVisitor;
-import org.apache.calcite.rex.RexVisitorImpl;
 import org.apache.calcite.sql.SqlExplainFormat;
 import org.apache.calcite.sql.SqlExplainLevel;
 import org.apache.calcite.sql.SqlKind;
@@ -80,8 +78,6 @@ import org.apache.calcite.util.mapping.MappingType;
 import org.apache.calcite.util.mapping.Mappings;
 
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableSet;
-import com.google.common.collect.Iterables;
 
 import org.checkerframework.checker.nullness.qual.Nullable;
 
@@ -228,6 +224,58 @@ public class RelFieldTrimmer implements ReflectiveVisitor {
                   (RexCorrelVariable) fieldAccess.getReferenceExpr();
               if (v.id.equals(correlation)) {
                 fieldsUsedBuilder.set(fieldAccess.getField().getIndex());
+              }
+              return fieldAccess;
+            }
+          });
+    }
+
+    return dispatchTrimFields(input, fieldsUsedBuilder.build(), extraFields);
+  }
+
+  /**
+   * Trims the fields of an input relational expression for RelNode with multiple inputs.
+   *
+   * @param rel        Relational expression
+   * @param input      Input relational expression, whose fields to trim
+   * @param startIndex Start index of the field range to process
+   * @param endIndex   End index of the field range to process (exclusive)
+   * @param fieldsUsed Bitmap of fields needed by the consumer
+   * @return New relational expression and its field mapping
+   */
+  protected TrimResult trimChild(
+      RelNode rel,
+      RelNode input,
+      int startIndex,
+      int endIndex,
+      final ImmutableBitSet fieldsUsed,
+      Set<RelDataTypeField> extraFields) {
+    final ImmutableBitSet.Builder fieldsUsedBuilder = fieldsUsed.rebuild();
+
+    // Fields that define the collation cannot be discarded.
+    final RelMetadataQuery mq = rel.getCluster().getMetadataQuery();
+    final ImmutableList<RelCollation> collations = mq.collations(input);
+    if (collations != null) {
+      for (RelCollation collation : collations) {
+        for (RelFieldCollation fieldCollation : collation.getFieldCollations()) {
+          fieldsUsedBuilder.set(fieldCollation.getFieldIndex());
+        }
+      }
+    }
+
+    // Correlating variables are a means for other relational expressions to use
+    // fields.
+    for (final CorrelationId correlation : rel.getVariablesSet()) {
+      rel.accept(
+          new CorrelationReferenceFinder() {
+            @Override protected RexNode handle(RexFieldAccess fieldAccess) {
+              final RexCorrelVariable v =
+                  (RexCorrelVariable) fieldAccess.getReferenceExpr();
+              if (v.id.equals(correlation)) {
+                if (fieldAccess.getField().getIndex() >= startIndex
+                    && fieldAccess.getField().getIndex() < endIndex) {
+                  fieldsUsedBuilder.set(fieldAccess.getField().getIndex() - startIndex);
+                }
               }
               return fieldAccess;
             }
@@ -478,77 +526,6 @@ public class RelFieldTrimmer implements ReflectiveVisitor {
   }
 
   /**
-   * Shuttle that finds all {@link TableScan}s inside a given {@link RelNode}.
-   */
-  private static class TableScanCollector extends RelHomogeneousShuttle {
-    private ImmutableSet.Builder<List<String>> builder = ImmutableSet.builder();
-
-    /** Qualified names. */
-    Set<List<String>> tables() {
-      return builder.build();
-    }
-
-    @Override public RelNode visit(TableScan scan) {
-      builder.add(scan.getTable().getQualifiedName());
-      return super.visit(scan);
-    }
-  }
-
-  /**
-   * Shuttle that finds all {@link TableScan}`s inside a given {@link RexNode}.
-   */
-  private static class InputTablesVisitor extends RexVisitorImpl<Void> {
-    private ImmutableSet.Builder<List<String>> builder = ImmutableSet.builder();
-
-    protected InputTablesVisitor() {
-      super(false);
-    }
-
-    /** Qualified names. */
-    Set<List<String>> tables() {
-      return builder.build();
-    }
-
-    @Override public Void visitSubQuery(RexSubQuery subQuery) {
-      if (subQuery.getKind() == SqlKind.SCALAR_QUERY) {
-        subQuery.rel.accept(new RelHomogeneousShuttle() {
-          @Override public RelNode visit(TableScan scan) {
-            builder.add(scan.getTable().getQualifiedName());
-            return super.visit(scan);
-          }
-        });
-      }
-      return null;
-    }
-  }
-
-  private boolean inputContainsSubQueryTables(Project project, RelNode input) {
-    InputTablesVisitor inputSubQueryTablesCollector = new InputTablesVisitor();
-
-    RexUtil.apply(inputSubQueryTablesCollector, project.getProjects(), null);
-
-    Set<List<String>> subQueryTables = inputSubQueryTablesCollector.tables();
-
-    assert subQueryTables.isEmpty() || subQueryTables.size() == 1
-        : "unexpected different tables in subquery: " + subQueryTables;
-
-    TableScanCollector inputTablesCollector = new TableScanCollector();
-    input.accept(inputTablesCollector);
-
-    Set<List<String>> inputTables = inputTablesCollector.tables();
-    // Check for input and subquery tables intersection.
-    if (!subQueryTables.isEmpty()) {
-      for (List<String> t : inputTables) {
-        if (t.equals(Iterables.getOnlyElement(subQueryTables))) {
-          return true;
-        }
-      }
-    }
-
-    return false;
-  }
-
-  /**
    * Variant of {@link #trimFields(RelNode, ImmutableBitSet, Set)} for
    * {@link org.apache.calcite.rel.logical.LogicalProject}.
    */
@@ -563,41 +540,19 @@ public class RelFieldTrimmer implements ReflectiveVisitor {
     // Which fields are required from the input?
     final Set<RelDataTypeField> inputExtraFields =
         new LinkedHashSet<>(extraFields);
-
-    // Collect all the SubQueries in the projection list.
-    List<RexSubQuery> subQueries = RexUtil.SubQueryCollector.collect(project);
-    // Get all the correlationIds present in the SubQueries
-    Set<CorrelationId> correlationIds = RelOptUtil.getVariablesUsed(subQueries);
-    // Subquery lookup is required.
-    boolean subQueryLookUp =
-        !correlationIds.isEmpty() && inputContainsSubQueryTables(project, input);
-
     RelOptUtil.InputFinder inputFinder =
-        new RelOptUtil.SubQueryAwareInputFinder(inputExtraFields, subQueryLookUp);
-
+        new RelOptUtil.InputFinder(inputExtraFields);
     for (Ord<RexNode> ord : Ord.zip(project.getProjects())) {
       if (fieldsUsed.get(ord.i)) {
         ord.e.accept(inputFinder);
       }
     }
 
-    ImmutableBitSet requiredColumns = ImmutableBitSet.of();
-    if (!correlationIds.isEmpty()) {
-      assert correlationIds.size() == 1;
-      // Correlation columns are also needed by SubQueries, so add them to inputFieldsUsed.
-      requiredColumns = RelOptUtil.correlationColumns(correlationIds.iterator().next(), project);
-    }
-
     ImmutableBitSet finderFields = inputFinder.build();
-
-    ImmutableBitSet inputFieldsUsed = ImmutableBitSet.builder()
-        .addAll(requiredColumns)
-        .addAll(finderFields)
-        .build();
 
     // Create input with trimmed columns.
     TrimResult trimResult =
-        trimChild(project, input, inputFieldsUsed, inputExtraFields);
+        trimChild(project, input, finderFields, inputExtraFields);
     RelNode newInput = trimResult.left;
     final Mapping inputMapping = trimResult.right;
 
@@ -616,9 +571,22 @@ public class RelFieldTrimmer implements ReflectiveVisitor {
 
     // Build new project expressions, and populate the mapping.
     final List<RexNode> newProjects = new ArrayList<>();
-    final RexVisitor<RexNode> shuttle =
-        new RexPermuteInputsShuttle(
-            inputMapping, newInput);
+    final RexVisitor<RexNode> shuttle;
+
+    if (!project.getVariablesSet().isEmpty()) {
+      shuttle = new RexPermuteInputsShuttle(inputMapping, newInput) {
+        @Override public RexNode visitSubQuery(RexSubQuery subQuery) {
+          subQuery = (RexSubQuery) super.visitSubQuery(subQuery);
+
+          return RelOptUtil.remapCorrelatesInSuqQuery(relBuilder.getRexBuilder(),
+            subQuery, project.getVariablesSet().iterator().next(),
+              newInput.getRowType(), inputMapping);
+        }
+      };
+    } else {
+      shuttle = new RexPermuteInputsShuttle(inputMapping, newInput);
+    }
+
     final Mapping mapping =
         Mappings.create(
             MappingType.INVERSE_SURJECTION,
@@ -628,14 +596,6 @@ public class RelFieldTrimmer implements ReflectiveVisitor {
       if (fieldsUsed.get(ord.i)) {
         mapping.set(ord.i, newProjects.size());
         RexNode newProjectExpr = ord.e.accept(shuttle);
-        // Subquery need to be remapped
-        if (newProjectExpr instanceof RexSubQuery
-            && newProjectExpr.getKind() == SqlKind.SCALAR_QUERY
-            && !correlationIds.isEmpty()) {
-          newProjectExpr =
-              changeCorrelateReferences((RexSubQuery) newProjectExpr,
-                  Iterables.getOnlyElement(correlationIds), newInput.getRowType(), inputMapping);
-        }
         newProjects.add(newProjectExpr);
       }
     }
@@ -645,27 +605,9 @@ public class RelFieldTrimmer implements ReflectiveVisitor {
             mapping);
 
     relBuilder.push(newInput);
-    relBuilder.project(newProjects, newRowType.getFieldNames());
+    relBuilder.project(newProjects, newRowType.getFieldNames(), false, project.getVariablesSet());
     final RelNode newProject = relBuilder.build();
     return result(newProject, mapping, project);
-  }
-
-  private RexNode changeCorrelateReferences(
-      RexSubQuery node,
-      CorrelationId corrId,
-      RelDataType rowType,
-      Mapping inputMapping) {
-    assert node.getKind() == SqlKind.SCALAR_QUERY : "Expected a SCALAR_QUERY, found "
-        + node.getKind();
-    RelNode subQuery = node.rel;
-    RexBuilder rexBuilder = relBuilder.getRexBuilder();
-
-    RexCorrelVariableMapShuttle rexVisitor =
-        new RexCorrelVariableMapShuttle(corrId, rowType, inputMapping, rexBuilder);
-    RelNode newSubQuery =
-        subQuery.accept(new RexRewritingRelShuttle(rexVisitor));
-
-    return RexSubQuery.scalar(newSubQuery);
   }
 
   /** Creates a project with a dummy column, to protect the parts of the system
@@ -894,6 +836,11 @@ public class RelFieldTrimmer implements ReflectiveVisitor {
       Join join,
       ImmutableBitSet fieldsUsed,
       Set<RelDataTypeField> extraFields) {
+    // If the column "mark" is included, it needs to be excluded first.
+    if (join.getJoinType() == JoinRelType.LEFT_MARK) {
+      int markIndex = join.getRowType().getFieldCount() - 1;
+      fieldsUsed = fieldsUsed.except(ImmutableBitSet.of(markIndex));
+    }
     final int fieldCount = join.getSystemFieldList().size()
         + join.getLeft().getRowType().getFieldCount()
         + join.getRight().getRowType().getFieldCount();
@@ -959,7 +906,8 @@ public class RelFieldTrimmer implements ReflectiveVisitor {
               : combinedInputExtraFields;
       inputExtraFieldCounts.add(inputExtraFields.size());
       TrimResult trimResult =
-          trimChild(join, input, inputFieldsUsed.build(), inputExtraFields);
+          trimChild(join, input, offset, offset + inputFieldCount,
+              inputFieldsUsed.build(), inputExtraFields);
       newInputs.add(trimResult.left);
       if (trimResult.left != input) {
         ++changeCount;
@@ -1014,17 +962,25 @@ public class RelFieldTrimmer implements ReflectiveVisitor {
     switch (join.getJoinType()) {
     case SEMI:
     case ANTI:
-      // For SemiJoins and AntiJoins only map fields from the left-side
+    case LEFT_MARK:
+      // For SemiJoins, AntiJoins and LeftMarkJoins only map fields from the left-side.
+      // For LeftMarkJoins, the mark column is also mapped.
       if (join.getJoinType() == JoinRelType.SEMI) {
         relBuilder.semiJoin(newConditionExpr);
-      } else {
+      } else if (join.getJoinType() == JoinRelType.ANTI) {
         relBuilder.antiJoin(newConditionExpr);
+      } else {
+        relBuilder.join(join.getJoinType(), newConditionExpr, join.getVariablesSet());
       }
       Mapping inputMapping = inputMappings.get(0);
+      int targetCount = newSystemFieldCount + inputMapping.getTargetCount();
+      if (join.getJoinType() == JoinRelType.LEFT_MARK) {
+        targetCount++;
+      }
       mapping =
           Mappings.create(MappingType.INVERSE_SURJECTION,
               join.getRowType().getFieldCount(),
-              newSystemFieldCount + inputMapping.getTargetCount());
+              targetCount);
       for (int i = 0; i < newSystemFieldCount; ++i) {
         mapping.set(i, i);
       }
@@ -1033,6 +989,9 @@ public class RelFieldTrimmer implements ReflectiveVisitor {
       for (IntPair pair : inputMapping) {
         mapping.set(pair.source + offset, pair.target + newOffset);
       }
+      if (join.getJoinType() == JoinRelType.LEFT_MARK) {
+        mapping.set(join.getRowType().getFieldCount() - 1, targetCount - 1);
+      }
       break;
     case ASOF:
     case LEFT_ASOF:
@@ -1040,7 +999,7 @@ public class RelFieldTrimmer implements ReflectiveVisitor {
           requireNonNull(newMatchConditionExpr, "newMatchConditionExpr"));
       break;
     default:
-      relBuilder.join(join.getJoinType(), newConditionExpr);
+      relBuilder.join(join.getJoinType(), newConditionExpr, join.getVariablesSet());
       break;
     }
     return result(relBuilder.build(), mapping, join);
@@ -1510,51 +1469,6 @@ public class RelFieldTrimmer implements ReflectiveVisitor {
                 correlate.getJoinType());
 
     return result(newCorrelate, mapping);
-  }
-
-  /**
-   * Updates correlate references in {@link RexNode} expressions.
-   */
-  static class RexCorrelVariableMapShuttle extends RexShuttle {
-    private final CorrelationId correlationId;
-    private final Mapping mapping;
-    private final RelDataType newCorrelRowType;
-    private final RexBuilder rexBuilder;
-
-
-    /**
-     * Constructs a RexCorrelVariableMapShuttle.
-     *
-     * @param correlationId The ID of the correlation variable to update.
-     * @param newCorrelRowType The new row type for the correlate reference.
-     * @param mapping Mapping to transform field indices.
-     * @param rexBuilder A builder for constructing new RexNodes.
-     */
-    RexCorrelVariableMapShuttle(final CorrelationId correlationId,
-        RelDataType newCorrelRowType, Mapping mapping, RexBuilder rexBuilder) {
-      this.correlationId = correlationId;
-      this.newCorrelRowType = newCorrelRowType;
-      this.mapping = mapping;
-      this.rexBuilder = rexBuilder;
-    }
-
-    @Override public RexNode visitFieldAccess(final RexFieldAccess fieldAccess) {
-      if (fieldAccess.getReferenceExpr() instanceof RexCorrelVariable) {
-        RexCorrelVariable referenceExpr =
-            (RexCorrelVariable) fieldAccess.getReferenceExpr();
-        if (referenceExpr.id.equals(correlationId)) {
-          int oldIndex = fieldAccess.getField().getIndex();
-          int newIndex = mapping.getTarget(oldIndex);
-          if (newIndex == oldIndex) {
-            return super.visitFieldAccess(fieldAccess);
-          }
-          RexNode newCorrel =
-              rexBuilder.makeCorrel(newCorrelRowType, referenceExpr.id);
-          return rexBuilder.makeFieldAccess(newCorrel, newIndex);
-        }
-      }
-      return super.visitFieldAccess(fieldAccess);
-    }
   }
 
   protected Mapping createMapping(ImmutableBitSet fieldsUsed, int fieldCount) {

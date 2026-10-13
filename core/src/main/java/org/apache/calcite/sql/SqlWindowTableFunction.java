@@ -40,6 +40,8 @@ import static com.google.common.base.Preconditions.checkArgument;
 
 import static org.apache.calcite.util.Static.RESOURCE;
 
+import static java.util.Objects.requireNonNull;
+
 /**
  * Base class for a table-valued function that computes windows. Examples
  * include {@code TUMBLE}, {@code HOP} and {@code SESSION}.
@@ -107,12 +109,35 @@ public class SqlWindowTableFunction extends SqlFunction
   private static RelDataType inferRowType(SqlOperatorBinding opBinding) {
     final RelDataType inputRowType = opBinding.getOperandType(0);
     final RelDataTypeFactory typeFactory = opBinding.getTypeFactory();
+    int precision = getTimestampPrecision(opBinding);
     return typeFactory.builder()
         .kind(inputRowType.getStructKind())
         .addAll(inputRowType.getFieldList())
-        .add("window_start", SqlTypeName.TIMESTAMP, 3)
-        .add("window_end", SqlTypeName.TIMESTAMP, 3)
+        .add("window_start", SqlTypeName.TIMESTAMP, precision)
+        .add("window_end", SqlTypeName.TIMESTAMP, precision)
         .build();
+  }
+
+  /** Extract the precision for the start_window, end_window columns from the column supplied as
+   * DESCRIPTOR for the window function. */
+  private static int getTimestampPrecision(SqlOperatorBinding opBinding) {
+    RelDataType inputRowType = opBinding.getOperandType(0);
+    SqlCallBinding callBinding = (SqlCallBinding) opBinding;
+    // Locate the "descriptor" argument
+    for (SqlNode operand : callBinding.operands()) {
+      if (operand instanceof SqlCall) {
+        SqlCall opCall = (SqlCall) operand;
+        if (opCall.getOperator().getKind() == SqlKind.DESCRIPTOR) {
+          SqlNode descriptor = opCall.operand(0);
+          SqlIdentifier id = (SqlIdentifier) descriptor;
+          RelDataTypeField field =
+              inputRowType.getField(id.getSimple(), false, false);
+          return requireNonNull(field, "field").getType().getPrecision();
+        }
+      }
+    }
+    // Should be unreachable, since validation succeeded
+    throw new RuntimeException("Could not locate DESCRIPTOR column");
   }
 
   /** Partial implementation of operand type checker. */
@@ -233,11 +258,16 @@ public class SqlWindowTableFunction extends SqlFunction
     void validateColumnNames(SqlValidator validator,
         List<String> fieldNames, List<SqlNode> columnNames) {
       final SqlNameMatcher matcher = validator.getCatalogReader().nameMatcher();
-      Ord.forEach(SqlIdentifier.simpleNames(columnNames), (name, i) -> {
-        if (matcher.indexOf(fieldNames, name) < 0) {
+      Ord.forEach(columnNames, (name, i) -> {
+        if (!(name instanceof SqlIdentifier) || !((SqlIdentifier) name).isSimple()) {
+          throw SqlUtil.newContextException(name.getParserPosition(),
+              RESOURCE.descriptorMustBeIdentifier());
+        }
+        String simpleName = ((SqlIdentifier) name).getSimple();
+        if (matcher.indexOf(fieldNames, simpleName) < 0) {
           final SqlIdentifier columnName = (SqlIdentifier) columnNames.get(i);
           throw SqlUtil.newContextException(columnName.getParserPosition(),
-              RESOURCE.unknownIdentifier(name));
+              RESOURCE.unknownIdentifier(simpleName));
         }
       });
     }

@@ -65,6 +65,8 @@ import java.math.BigInteger;
 import java.nio.charset.Charset;
 import java.text.DateFormat;
 import java.text.SimpleDateFormat;
+import java.time.DateTimeException;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.IllformedLocaleException;
@@ -403,21 +405,34 @@ public final class SqlParserUtil {
 
   public static SqlTimestampTzLiteral parseTimestampTzLiteral(
       String s, SqlParserPos pos) {
-    // We expect the string to end in a timezone.
-    int lastSpace = s.lastIndexOf(" ");
-    if (lastSpace >= 0) {
+    // We expect the string to to contain exactly two spaces:
+    // - one between date and time
+    // - one between time and timezone
+    long spaces = s.chars().filter(c -> c == ' ').count();
+    if (spaces == 2) {
+      int lastSpace = s.lastIndexOf(" ");
       final String timeZone = s.substring(lastSpace + 1);
       final String timestamp = s.substring(0, lastSpace);
-      TimeZone tz = TimeZone.getTimeZone(timeZone);
-      if (tz != null) {
-        SqlTimestampLiteral ts = parseTimestampLiteral(SqlTypeName.TIMESTAMP, timestamp, pos);
-        TimestampWithTimeZoneString tsz = new TimestampWithTimeZoneString(ts.getTimestamp(), tz);
-        return SqlLiteral.createTimestamp(tsz, ts.getPrec(), pos);
+      try {
+        ZoneId zoneId = ZoneId.of(timeZone);
+        TimeZone tz = TimeZone.getTimeZone(zoneId);
+        if (tz != null) {
+          SqlTimestampLiteral ts = parseTimestampLiteral(SqlTypeName.TIMESTAMP, timestamp, pos);
+          TimestampWithTimeZoneString tsz = new TimestampWithTimeZoneString(ts.getTimestamp(), tz);
+          return SqlLiteral.createTimestamp(tsz, ts.getPrec(), pos);
+        }
+      } catch (DateTimeException e) {
+        String message = e.getMessage();
+        if (message == null) {
+          message = "Error parsing TIME ZONE";
+        }
+        throw SqlUtil.newContextException(pos,
+            RESOURCE.illegalLiteral("TIMESTAMP WITH TIME ZONE", s, message));
       }
     }
     throw SqlUtil.newContextException(pos,
         RESOURCE.illegalLiteral("TIMESTAMP WITH TIME ZONE", s,
-            RESOURCE.badFormat(DateTimeUtils.TIMESTAMP_FORMAT_STRING).str()));
+            RESOURCE.badFormat(DateTimeUtils.TIMESTAMP_FORMAT_STRING + " zone").str()));
   }
 
   private static SqlTimestampLiteral parseTimestampLiteral(SqlTypeName typeName,
@@ -742,10 +757,16 @@ public final class SqlParserUtil {
     return i + column;
   }
 
+  /** Given a string with carets, double each of them.
+   * (This should probably be more sophisticated, and ignore carets within string literals). */
+  public static String escapeCarets(String sql) {
+    return sql.replace("^", "^^");
+  }
+
   /**
    * Converts a string to a string with one or two carets in it. For example,
    * <code>addCarets("values (foo)", 1, 9, 1, 12)</code> yields "values
-   * (^foo^)".
+   * (^foo^)".  Existing carets are escaped by doubling.
    */
   public static String addCarets(
       String sql,
@@ -755,8 +776,8 @@ public final class SqlParserUtil {
       int endCol) {
     String sqlWithCarets;
     int cut = lineColToIndex(sql, line, col);
-    sqlWithCarets = sql.substring(0, cut) + "^"
-        + sql.substring(cut);
+    sqlWithCarets = escapeCarets(sql.substring(0, cut)) + "^"
+        + escapeCarets(sql.substring(cut));
     if ((col != endCol) || (line != endLine)) {
       cut = lineColToIndex(sqlWithCarets, endLine, endCol);
       if (line == endLine) {
@@ -765,7 +786,7 @@ public final class SqlParserUtil {
       if (cut < sqlWithCarets.length()) {
         sqlWithCarets =
             sqlWithCarets.substring(0, cut)
-                + "^" + sqlWithCarets.substring(cut);
+                + "^" + escapeCarets(sqlWithCarets.substring(cut));
       } else {
         sqlWithCarets += "^";
       }

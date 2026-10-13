@@ -124,9 +124,6 @@ import java.util.stream.Stream;
 import static com.google.common.base.Preconditions.checkArgument;
 
 import static org.apache.calcite.rex.RexLiteral.stringValue;
-import static org.apache.calcite.sql.SqlKind.EXISTS;
-import static org.apache.calcite.sql.SqlKind.IN;
-import static org.apache.calcite.sql.SqlKind.NOT;
 import static org.apache.calcite.util.Util.last;
 
 import static java.util.Objects.requireNonNull;
@@ -226,6 +223,74 @@ public class RelToSqlConverter extends SqlImplementor
     }
   }
 
+  /**
+   * Wraps a nested join into a subquery with explicit column aliases.
+   *
+   * <p>This is specifically required for dialects like ClickHouse where the
+   * identifier resolver cannot resolve columns with internal table qualifiers
+   * (e.g., 'd1.loc') when they are wrapped in a subquery alias. By forcing
+   * an explicit 'AS' projection for every column, we ensure the identifiers
+   * are flattened and visible to the outer query block.
+   *
+   * @param input     The Result of the nested join branch
+   * @param inputRel  The RelNode representing the join branch to extract row types
+   * @param outerAlias The alias to be assigned to the wrapped subquery
+   * @return A new Result containing the wrapped SQL with explicit aliases
+   */
+  protected Result wrapNestedJoin(Result input, RelNode inputRel, String outerAlias) {
+    final SqlParserPos pos = SqlParserPos.ZERO;
+
+    // Obtain a SqlSelect representation of the input.
+    // We manually rewrite the SelectList to enforce explicit column aliases,
+    // preventing ClickHouse scoping issues while avoiding redundant sub-query nesting.
+    final SqlSelect innerSelect = input.asSelect();
+    final SqlNodeList originalSelectList = innerSelect.getSelectList();
+    final List<String> fieldNames = inputRel.getRowType().getFieldNames();
+
+    final List<SqlNode> newSelectList = new ArrayList<>();
+
+    // Iterate through the fields to build explicit projections.
+    // Example: transforms 'd1.deptno' into 'd1.deptno AS deptno'.
+    for (int i = 0; i < fieldNames.size(); i++) {
+      SqlNode expr = originalSelectList.get(i);
+      String targetName = fieldNames.get(i);
+
+      // If the expression is already aliased, strip the AS to get the raw expression.
+      if (expr.getKind() == SqlKind.AS) {
+        expr = ((SqlCall) expr).operand(0);
+      }
+
+      // Force an explicit alias to mask internal table qualifiers.
+      // This ensures the outer JOIN can resolve the column name
+      // without being confused by nested scope identifiers.
+      newSelectList.add(
+          SqlStdOperatorTable.AS.createCall(
+              pos,
+              expr,
+              new SqlIdentifier(targetName, pos)));
+    }
+
+    // Update the select list of the inner query with flattened aliases.
+    innerSelect.setSelectList(new SqlNodeList(newSelectList, pos));
+
+    // Wrap the modified Select node with the outer alias (e.g., AS j).
+    SqlNode wrappedNode =
+        SqlStdOperatorTable.AS.createCall(pos,
+        innerSelect,
+        new SqlIdentifier(outerAlias, pos));
+
+    // Return a new Result with empty clause lists. This "finalizes" the
+    // current sub-query and ensures the Implementor won't add
+    // redundant SELECT wrappers in subsequent steps.
+    return new Result(
+        wrappedNode,
+        Collections.emptyList(),
+        outerAlias,
+        inputRel.getRowType(),
+        ImmutableMap.of(outerAlias, inputRel.getRowType()));
+  }
+
+
   /** Visits a Join; called by {@link #dispatch} via reflection. */
   public Result visit(Join e) {
     switch (e.getJoinType()) {
@@ -236,9 +301,28 @@ public class RelToSqlConverter extends SqlImplementor
       break;
     }
     final Result leftResult = visitInput(e, 0).resetAlias();
-    final Result rightResult = visitInput(e, 1).resetAlias();
+    Result rightResult = visitInput(e, 1).resetAlias();
+
+    if (dialect.shouldWrapNestedJoin(e)) {
+
+      Set<String> usedNames = new HashSet<>(e.getRowType().getFieldNames());
+      // Add both left and right aliases
+      if (leftResult.neededAlias != null) {
+        usedNames.add(leftResult.neededAlias);
+      }
+      if (rightResult.neededAlias != null) {
+        usedNames.add(rightResult.neededAlias);
+      }
+
+      String safeAlias =
+          SqlValidatorUtil.uniquify("t", usedNames, SqlValidatorUtil.EXPR_SUGGESTER);
+
+      rightResult = wrapNestedJoin(rightResult, e.getRight(), safeAlias);
+    }
+
     final Context leftContext = leftResult.qualifiedContext();
     final Context rightContext = rightResult.qualifiedContext();
+    parseCorrelTable(e, leftContext.implementor().joinContext(leftContext, rightContext));
     final SqlNode sqlCondition;
     final JoinConditionType condType;
     JoinType joinType = joinType(e.getJoinType());
@@ -329,7 +413,9 @@ public class RelToSqlConverter extends SqlImplementor
     }
     sqlSelect.setWhere(sqlCondition);
 
-    if (leftResult.neededAlias != null && sqlSelect.getFrom() != null) {
+    if (leftResult.neededAlias != null
+        && sqlSelect.getFrom() != null
+        && sqlSelect.getFrom().getKind() != SqlKind.JOIN) {
       sqlSelect.setFrom(as(sqlSelect.getFrom(), leftResult.neededAlias));
     }
     return result(sqlSelect, ImmutableList.of(Clause.FROM), e, null);
@@ -478,9 +564,7 @@ public class RelToSqlConverter extends SqlImplementor
       return builder.result();
     } else {
       Result x = visitInput(e, 0, Clause.WHERE);
-      if (e.getCondition().getKind() == NOT
-          || e.getCondition().getKind() == EXISTS
-          || e.getCondition().getKind() == IN) {
+      if (!e.getVariablesSet().isEmpty()) {
         x = x.resetAlias();
       }
       parseCorrelTable(e, x);
@@ -520,18 +604,87 @@ public class RelToSqlConverter extends SqlImplementor
     return false;
   }
 
-  /** Visits a Project; called by {@link #dispatch} via reflection. */
+  /**
+   * Extracts the table name from a SqlNode if it represents a simple table reference.
+   * Returns null for complex nodes like subqueries or joins.
+   *
+   * <p>Examples:
+   * <ul>
+   *   <li>"product" → "product"</li>
+   *   <li>"foodmart.product" → "product"</li>
+   *   <li>"SCOTT"."EMP" → "EMP"</li>
+   *   <li>Subquery/Join/Other → null</li>
+   * </ul>
+   *
+   * @param node The SQL node to examine
+   * @return The table name if it's a simple identifier, null otherwise
+   */
+  private @Nullable String unqualifiedName(SqlNode node) {
+    if (node instanceof SqlIdentifier) {
+      SqlIdentifier id = (SqlIdentifier) node;
+      // Return the last component (table name)
+      return id.names.get(id.names.size() - 1);
+    }
+
+    // All other cases: return null
+    return null;
+  }
+  /**
+   * Visits a {@link Project} and converts it to a {@link SqlSelect}.
+   *
+   * <p>If the project defines correlation variables (e.g., via {@code $cor0}),
+   * this method ensures that the input relation is assigned a stable alias
+   * (either the natural table name or a synthetic alias like 't').
+   * This enables nested correlated subqueries to correctly qualify their
+   * column references back to this project's scope.
+   *
+   * <p>For simple table scans, it avoids forcing an explicit 'AS' clause
+   * to maintain compatibility with DML statements (like UPDATE/DELETE)
+   * in certain SQL dialects.
+   */
   public Result visit(Project e) {
     // If the input is a Sort, wrap SELECT is not required.
     final Result x;
+    final Set<CorrelationId> definedHere = e.getVariablesSet();
+    boolean pushed = !definedHere.isEmpty();
+
+    // Visit input node
+    Result inputResult;
     if (e.getInput() instanceof Sort) {
-      x = visitInput(e, 0);
+      inputResult = visitInput(e, 0);
     } else {
-      x = visitInput(e, 0, Clause.SELECT);
+      inputResult = visitInput(e, 0, Clause.SELECT);
+    }
+
+    // If this Project defines correlations, fill in alias and force explicit generation
+    // Resolve the correlation alias using a three-level priority:
+    // 1. Use the existing alias from inputResult if it's already defined.
+    // 2. If not, extract the natural table name to maintain DML compatibility.
+    // 3. Fallback to 't' for anonymous relations (e.g., Joins or Sub-queries).
+    //
+    // 't' is safe and standard in Calcite's SqlImplementor because:
+    // - Anonymous relations in the FROM clause require an alias in most dialects.
+    // - SQL name shadowing rules ensure that nested sub-queries correctly bind
+    //   to the nearest qualifying 't' in their scope.
+    if (pushed) {
+      String alias = inputResult.neededAlias;
+      if (alias != null) {
+        x = inputResult.resetAliasForCorrelation(alias, e.getInput().getRowType());
+      } else {
+        alias = unqualifiedName(inputResult.node);
+        if (alias == null) {
+          alias = "t";
+        }
+        x = inputResult.resetAliasForCorrelation
+                (alias, e.getInput().getRowType());
+      }
+    } else {
+      x = inputResult;
     }
     parseCorrelTable(e, x);
     final Builder builder = x.builder(e);
-    if (!isStar(e.getProjects(), e.getInput().getRowType(), e.getRowType())) {
+    if (!isStar(e.getProjects(), e.getInput().getRowType(), e.getRowType())
+        || !dialect.supportGenerateSelectStar(e.getInput())) {
       final List<SqlNode> selectList = new ArrayList<>();
       for (RexNode ref : e.getProjects()) {
         SqlNode sqlExpr = builder.context.toSql(null, ref);
@@ -1125,9 +1278,6 @@ public class RelToSqlConverter extends SqlImplementor
 
   /** Visits a TableModify; called by {@link #dispatch} via reflection. */
   public Result visit(TableModify modify) {
-    final Map<String, RelDataType> pairs = ImmutableMap.of();
-    final Context context = aliasContext(pairs, false);
-
     // Target Table Name
     final SqlIdentifier sqlTargetTable = getSqlTargetTable(modify);
 
@@ -1146,6 +1296,10 @@ public class RelToSqlConverter extends SqlImplementor
     }
     case UPDATE: {
       final Result input = visitInput(modify, 0);
+      // SELECT statement has two parts: columns from the target table (old values) and
+      // expressions for the UPDATE. See the TableModify documentation for details.
+      final SqlSelect select = input.asSelect();
+      final Context context = selectListContext(select.getSelectList(), false);
 
       final SqlUpdate sqlUpdate =
           new SqlUpdate(POS, sqlTargetTable,
@@ -1155,8 +1309,7 @@ public class RelToSqlConverter extends SqlImplementor
               exprList(context,
                   requireNonNull(modify.getSourceExpressionList(),
                       () -> "modify.getSourceExpressionList() is null for " + modify)),
-              ((SqlSelect) input.node).getWhere(), input.asSelect(),
-              null);
+              select.getWhere(), select, null);
 
       return result(sqlUpdate, input.clauses, modify, null);
     }
@@ -1176,7 +1329,7 @@ public class RelToSqlConverter extends SqlImplementor
       // `WHEN NOT MATCHED THEN INSERT` clauses, the selectList consists of three parts:
       // the insert expression, the target table reference, and the update expression.
       // When querying with the `WHEN MATCHED THEN UPDATE` clause, the selectList will not
-      // include the update expression.
+      // include the insert expression.
       // However, when querying with the `WHEN NOT MATCHED THEN INSERT` clause,
       // the expression list will only contain the insert expression.
       final SqlNodeList selectList = SqlUtil.stripListAs(select.getSelectList());
@@ -1436,6 +1589,20 @@ public class RelToSqlConverter extends SqlImplementor
   private void parseCorrelTable(RelNode relNode, Result x) {
     for (CorrelationId id : relNode.getVariablesSet()) {
       correlTableMap.put(id, x.qualifiedContext());
+    }
+  }
+
+  /**
+   * Populate correlation table information and stores it in the correlation table map.
+   * Iterates through all variables in the relational node and maps each {@link CorrelationId}
+   * to its corresponding {@link Context} information.
+   *
+   * @param relNode The relational node containing the variable set to be parsed
+   * @param context The current context information used to establish mapping with correlation IDs
+   */
+  private void parseCorrelTable(RelNode relNode, Context context) {
+    for (CorrelationId id : relNode.getVariablesSet()) {
+      correlTableMap.put(id, context);
     }
   }
 

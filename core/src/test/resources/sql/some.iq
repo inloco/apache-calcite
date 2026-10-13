@@ -128,12 +128,24 @@ from "scott".emp;
 (14 rows)
 
 !ok
+
+!if (use_old_decorr) {
 EnumerableCalc(expr#0..10=[{inputs}], expr#11=[0], expr#12=[=($t9, $t11)], expr#13=[>($t9, $t10)], expr#14=[null:BOOLEAN], expr#15=[<=($t5, $t8)], expr#16=[IS NOT TRUE($t15)], expr#17=[AND($t13, $t14, $t16)], expr#18=[>($t5, $t8)], expr#19=[<=($t9, $t10)], expr#20=[AND($t18, $t16, $t19)], expr#21=[OR($t12, $t17, $t20)], proj#0..7=[{exprs}], X=[$t21])
   EnumerableNestedLoopJoin(condition=[true], joinType=[inner])
     EnumerableTableScan(table=[[scott, EMP]])
     EnumerableAggregate(group=[{}], m=[MAX($6)], c=[COUNT()], d=[COUNT($6)])
       EnumerableTableScan(table=[[scott, EMP]])
 !plan
+!}
+
+!if (use_new_decorr) {
+EnumerableCalc(expr#0..8=[{inputs}], expr#9=[NOT($t8)], proj#0..7=[{exprs}], X=[$t9])
+  EnumerableNestedLoopJoin(condition=[<=($5, $8)], joinType=[left_mark])
+    EnumerableTableScan(table=[[scott, EMP]])
+    EnumerableCalc(expr#0..7=[{inputs}], COMM=[$t6])
+      EnumerableTableScan(table=[[scott, EMP]])
+!plan
+!}
 
 # NOT SOME; left side NOT NULL, right side nullable; converse of previous query.
 select * from "scott".emp
@@ -895,7 +907,10 @@ where sal > some (4000, 2000);
 
 !ok
 
-# CALCITE-6786: ANY/SOME operator yields multiple rows in correlated queries
+# Reset to default value 20
+!set insubquerythreshold 20
+
+# [CALCITE-6786] ANY/SOME operator yields multiple rows in correlated queries
 
 WITH tb as (select array(SELECT * FROM (VALUES (TRUE), (NULL)) as x(a)) as a)
 SELECT TRUE IN (SELECT b FROM UNNEST(a) AS x1(b)) AS test FROM tb;
@@ -968,5 +983,55 @@ where sal > any (4000, 2000);
 (6 rows)
 
 !ok
-# End some.iq
 
+# [CALCITE-5093] Quantified comparison operators (e.g. ANY) should support ARRAY arguments
+select 1 = any(Array [1, 2, 3]),
+  4 = any(Array [1, 2, 3]),
+  1 > any(Array [1, 2, 3]),
+  1 < any(Array [1, 2, 3]);
++--------+--------+--------+--------+
+| EXPR$0 | EXPR$1 | EXPR$2 | EXPR$3 |
++--------+--------+--------+--------+
+| true   | false  | false  | true   |
++--------+--------+--------+--------+
+(1 row)
+
+!ok
+EnumerableCalc(expr#0=[{inputs}], expr#1=[1], expr#2=[2], expr#3=[3], expr#4=[ARRAY($t1, $t2, $t3)], expr#5=[= SOME($t1, $t4)], expr#6=[4], expr#7=[= SOME($t6, $t4)], expr#8=[> SOME($t1, $t4)], expr#9=[< SOME($t1, $t4)], EXPR$0=[$t5], EXPR$1=[$t7], EXPR$2=[$t8], EXPR$3=[$t9])
+  EnumerableValues(tuples=[[{ 0 }]])
+!plan
+
+# [CALCITE-7359] Support various nested type comparisons in ANY/ALL
+# Test with different operators and deeper nesting
+select
+  -- Equality for nested arrays
+  array[array[1,1],array[2,2]] = any(array[array[1,1],array[2,2]], array[array[3,3],array[4,4]]) as arr_arr_t,
+  -- Array of Row
+  array[row(1, 'a'), row(2, 'b')] = any(array[row(1, 'a'), row(2, 'b')], array[row(3, 'c')]) as arr_row_t,
+  -- Non-equality for nested arrays
+  array[1, 2] <> any(array[1, 2], array[1, 3]) as arr_ne_t,
+  -- Inequalities for nested arrays
+  array[1, 2] < any(array[1, 1], array[1, 3]) as arr_lt_t,
+  array[1, 2] <= any(array[0, 9], array[1, 2]) as arr_le_t,
+  array[1, 2] > any(array[1, 1], array[2, 0]) as arr_gt_t,
+  array[1, 2] >= any(array[1, 2], array[1, 3]) as arr_ge_t,
+
+  -- Nested structures with NULL values
+  array[1, cast(null as integer)] = any(array[1, cast(null as integer)], array[1, 2]) as arr_null_t,
+  array[1, cast(null as integer)] = any(array[1, 2], array[1, 3]) as arr_null_f,
+
+  -- Deeper nesting: Array of Row of Array
+  array[row(1, array[10, 20]), row(2, array[30])] =
+    any(array[row(1, array[10, 20]), row(2, array[30])], array[row(1, array[0])]) as deep_t,
+  array[row(1, array[10, 20]), row(2, array[30])] =
+    any(array[row(1, array[10, 21]), row(2, array[30])], array[row(1, array[0])]) as deep_f;
++-----------+-----------+----------+----------+----------+----------+----------+------------+------------+--------+--------+
+| ARR_ARR_T | ARR_ROW_T | ARR_NE_T | ARR_LT_T | ARR_LE_T | ARR_GT_T | ARR_GE_T | ARR_NULL_T | ARR_NULL_F | DEEP_T | DEEP_F |
++-----------+-----------+----------+----------+----------+----------+----------+------------+------------+--------+--------+
+| true      | true      | true     | true     | true     | true     | true     | true       | false      | true   | false  |
++-----------+-----------+----------+----------+----------+----------+----------+------------+------------+--------+--------+
+(1 row)
+
+!ok
+
+# End some.iq

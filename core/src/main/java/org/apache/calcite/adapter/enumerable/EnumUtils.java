@@ -17,6 +17,7 @@
 package org.apache.calcite.adapter.enumerable;
 
 import org.apache.calcite.adapter.java.JavaTypeFactory;
+import org.apache.calcite.avatica.util.ByteString;
 import org.apache.calcite.avatica.util.DateTimeUtils;
 import org.apache.calcite.linq4j.AbstractEnumerable;
 import org.apache.calcite.linq4j.Enumerable;
@@ -26,6 +27,7 @@ import org.apache.calcite.linq4j.Nullness;
 import org.apache.calcite.linq4j.Ord;
 import org.apache.calcite.linq4j.function.Function1;
 import org.apache.calcite.linq4j.function.Function2;
+import org.apache.calcite.linq4j.function.NullablePredicate2;
 import org.apache.calcite.linq4j.function.Predicate2;
 import org.apache.calcite.linq4j.tree.BlockBuilder;
 import org.apache.calcite.linq4j.tree.BlockStatement;
@@ -44,6 +46,7 @@ import org.apache.calcite.linq4j.tree.Primitive;
 import org.apache.calcite.linq4j.tree.Statement;
 import org.apache.calcite.linq4j.tree.Types;
 import org.apache.calcite.linq4j.tree.UnaryExpression;
+import org.apache.calcite.linq4j.tree.UnsignedType;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.core.JoinRelType;
 import org.apache.calcite.rel.type.RelDataType;
@@ -304,6 +307,8 @@ public class EnumUtils {
       } else if (targetType == Long.class) {
         return Expressions.call(BuiltInMethod.TIMESTAMP_TO_LONG_OPTIONAL.method, operand);
       }
+    } else if (fromType == byte[].class && targetType == ByteString.class) {
+      return Expressions.call(BuiltInMethod.BYTE_ARRAY_TO_BYTE_STRING.method, operand);
     }
     return operand;
   }
@@ -344,6 +349,8 @@ public class EnumUtils {
       if (isA(fromType, Primitive.LONG)) {
         return Expressions.call(BuiltInMethod.INTERNAL_TO_TIMESTAMP.method, operand);
       }
+    } else if (targetType == byte[].class && fromType == ByteString.class) {
+      return Expressions.call(BuiltInMethod.BYTE_STRING_TO_BYTE_ARRAY.method, operand);
     }
     if (Primitive.is(operand.type)
         && Primitive.isBox(targetType)) {
@@ -435,6 +442,13 @@ public class EnumUtils {
       return operand;
     }
 
+    if (fromType == byte[].class && toType == ByteString.class) {
+      return Expressions.call(BuiltInMethod.BYTE_ARRAY_TO_BYTE_STRING.method, operand);
+    }
+    if (fromType == ByteString.class && toType == byte[].class) {
+      return Expressions.call(BuiltInMethod.BYTE_STRING_TO_BYTE_ARRAY.method, operand);
+    }
+
     // TODO use Expressions#convertChecked to throw exception in case of overflow (CALCITE-6366)
 
     // E.g. from "Short" to "int".
@@ -443,6 +457,7 @@ public class EnumUtils {
     final Primitive toBox = Primitive.ofBox(toType);
     final Primitive fromBox = Primitive.ofBox(fromType);
     final Primitive fromPrimitive = Primitive.of(fromType);
+    final UnsignedType unsignedType = UnsignedType.of(toType);
     final boolean fromNumber = fromType instanceof Class
         && Number.class.isAssignableFrom((Class) fromType);
     if (fromType == String.class) {
@@ -598,6 +613,26 @@ public class EnumUtils {
               SqlFunctions.class,
               "toBigDecimal",
               operand));
+    } else if (unsignedType != null) {
+      // E.e. toULong
+      String functionName = unsignedType.getConvertFunctionName();
+      if (fromPrimitive != null) {
+        // E.g. from "int" to "ULong".
+        // Generate "UnsignedType.toULong(x)"
+        return Expressions.call(
+            UnsignedType.class,
+            functionName,
+            operand);
+      } else {
+        // Generate "x == null ? null : UnsignedType.toULong(x)"
+        return Expressions.condition(
+            Expressions.equal(operand, RexImpTable.NULL_EXPR),
+            RexImpTable.NULL_EXPR,
+            Expressions.call(
+                UnsignedType.class,
+                functionName,
+                operand));
+      }
     } else if (toType == String.class) {
       if (fromPrimitive != null) {
         switch (fromPrimitive) {
@@ -752,8 +787,8 @@ public class EnumUtils {
    * @throws RuntimeException if no suitable method found
    */
   public static MethodCallExpression call(@Nullable Expression targetExpression,
-      Class clazz, String methodName, List<? extends Expression> arguments) {
-    Class[] argumentTypes = Types.toClassArray(arguments);
+      Class<?> clazz, String methodName, List<? extends Expression> arguments) {
+    Class<?>[] argumentTypes = Types.toClassArray(arguments);
     try {
       Method candidate = clazz.getMethod(methodName, argumentTypes);
       return Expressions.call(targetExpression, candidate, arguments);
@@ -853,6 +888,8 @@ public class EnumUtils {
       return JoinType.ASOF;
     case LEFT_ASOF:
       return JoinType.LEFT_ASOF;
+    case LEFT_MARK:
+      return JoinType.LEFT_MARK;
     default:
       break;
     }
@@ -860,7 +897,47 @@ public class EnumUtils {
         "Unable to convert " + joinRelType + " to Linq4j JoinType");
   }
 
-  /** Returns a predicate expression based on a join condition. */
+  /**
+   * Return the result selector of a mark join. It is a Expression that will generate a Function2 in
+   * runtime, the Function2 will concat the left/right side row and the marker.
+   *
+   * <p> For example:
+   *
+   * <blockquote><pre>
+   * new Function2&lt;Object[], Boolean, Object[]&gt;() {
+   *    public Object[] apply(Object[] input, Boolean marker) {
+   *        return new Object[] {
+   *          input[0], input[1], ..., input[n], marker
+   *        };
+   *    }
+   * }</pre></blockquote>
+   *
+   * @param resultPhysType  Physical type of result
+   * @param inputPhysType   Physical type of lhs/rhs
+   * @return  the result selector of a mark join
+   */
+  static Expression markJoinSelector(PhysType resultPhysType, PhysType inputPhysType) {
+    final List<ParameterExpression> parameters = new ArrayList<>();
+    final ParameterExpression inputParameter =
+        Expressions.parameter(Primitive.box(inputPhysType.getJavaRowType()), "input");
+    final ParameterExpression markerParameter
+        = Expressions.parameter(Boolean.class, "marker");
+    parameters.add(inputParameter);
+    parameters.add(markerParameter);
+
+    final List<Expression> expressions = new ArrayList<>();
+    final int inputFieldCount = inputPhysType.getRowType().getFieldCount();
+    for (int i = 0; i < inputFieldCount; i++) {
+      Expression expression = inputPhysType.fieldReference(inputParameter, i);
+      expressions.add(expression);
+    }
+    expressions.add(markerParameter);
+    return Expressions.lambda(
+        Function2.class,
+        resultPhysType.record(expressions),
+        parameters);
+  }
+
   static Expression generatePredicate(
       EnumerableRelImplementor implementor,
       RexBuilder rexBuilder,
@@ -869,6 +946,24 @@ public class EnumUtils {
       PhysType leftPhysType,
       PhysType rightPhysType,
       RexNode condition) {
+    return generatePredicate(implementor, rexBuilder, left, right,
+        leftPhysType, rightPhysType, condition, false);
+  }
+
+  /**
+   * Returns a predicate expression based on a join condition. If one of the arguments of the
+   * expression is NULL, when <code>nullable</code> is TRUE, the expression will return NULL value;
+   * when <code>nullable</code> is FALSE, it will return FALSE.
+   */
+  static Expression generatePredicate(
+      EnumerableRelImplementor implementor,
+      RexBuilder rexBuilder,
+      RelNode left,
+      RelNode right,
+      PhysType leftPhysType,
+      PhysType rightPhysType,
+      RexNode condition,
+      boolean nullable) {
     final BlockBuilder builder = new BlockBuilder();
     final ParameterExpression left_ =
         Expressions.parameter(leftPhysType.getJavaRowType(), "left");
@@ -891,8 +986,10 @@ public class EnumUtils {
                     ImmutableMap.of(left_, leftPhysType,
                         right_, rightPhysType)),
                 implementor.allCorrelateVariables,
-                implementor.getConformance())));
-    return Expressions.lambda(Predicate2.class, builder.toBlock(), left_, right_);
+                implementor.getConformance(),
+                nullable)));
+    Class clazz = nullable ? NullablePredicate2.class : Predicate2.class;
+    return Expressions.lambda(clazz, builder.toBlock(), left_, right_);
   }
 
   /**

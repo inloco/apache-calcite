@@ -89,21 +89,25 @@ insert into table2 values (NULL, 1), (2, 1);
 # Checked on Oracle
 !set lateDecorrelate true
 select i, j from table1 where table1.j NOT IN (select i from table2 where table1.i=table2.j);
+!if (use_old_decorr) {
 EnumerableCalc(expr#0..7=[{inputs}], expr#8=[0], expr#9=[=($t3, $t8)], expr#10=[IS NULL($t1)], expr#11=[IS NOT NULL($t7)], expr#12=[<($t4, $t3)], expr#13=[OR($t10, $t11, $t12)], expr#14=[IS NOT TRUE($t13)], expr#15=[OR($t9, $t14)], proj#0..1=[{exprs}], $condition=[$t15])
   EnumerableMergeJoin(condition=[AND(=($0, $6), =($1, $5))], joinType=[left])
     EnumerableSort(sort0=[$0], sort1=[$1], dir0=[ASC], dir1=[ASC])
-      EnumerableMergeJoin(condition=[=($0, $2)], joinType=[left])
-        EnumerableSort(sort0=[$0], dir0=[ASC])
-          EnumerableTableScan(table=[[BLANK, TABLE1]])
-        EnumerableSort(sort0=[$0], dir0=[ASC])
-          EnumerableAggregate(group=[{1}], c=[COUNT()], ck=[COUNT($0)])
-            EnumerableCalc(expr#0..1=[{inputs}], expr#2=[IS NOT NULL($t1)], proj#0..1=[{exprs}], $condition=[$t2])
-              EnumerableTableScan(table=[[BLANK, TABLE2]])
+      EnumerableHashJoin(condition=[IS NOT DISTINCT FROM($0, $2)], joinType=[left])
+        EnumerableTableScan(table=[[BLANK, TABLE1]])
+        EnumerableCalc(expr#0..3=[{inputs}], expr#4=[IS NOT NULL($t2)], expr#5=[0], expr#6=[CASE($t4, $t2, $t5)], expr#7=[IS NOT NULL($t3)], expr#8=[CASE($t7, $t3, $t5)], J=[$t0], c=[$t6], ck=[$t8])
+          EnumerableHashJoin(condition=[IS NOT DISTINCT FROM($0, $1)], joinType=[left])
+            EnumerableAggregate(group=[{0}])
+              EnumerableTableScan(table=[[BLANK, TABLE1]])
+            EnumerableAggregate(group=[{1}], c=[COUNT()], ck=[COUNT($0)])
+              EnumerableCalc(expr#0..1=[{inputs}], expr#2=[IS NOT NULL($t1)], proj#0..1=[{exprs}], $condition=[$t2])
+                EnumerableTableScan(table=[[BLANK, TABLE2]])
     EnumerableSort(sort0=[$1], sort1=[$0], dir0=[ASC], dir1=[ASC])
       EnumerableAggregate(group=[{0, 1}], i=[LITERAL_AGG(true)])
         EnumerableCalc(expr#0..1=[{inputs}], expr#2=[IS NOT NULL($t1)], expr#3=[IS NOT NULL($t0)], expr#4=[AND($t2, $t3)], proj#0..1=[{exprs}], $condition=[$t4])
           EnumerableTableScan(table=[[BLANK, TABLE2]])
 !plan
+!}
 +---+---+
 | I | J |
 +---+---+
@@ -151,5 +155,245 @@ select * from table1 where j not in (select i from table2) or j = 3;
 (1 row)
 
 !ok
+
+# [CALCITE-4813] ANY_VALUE assumes that arguments should be comparable
+select any_value(r) over(), s from(select array[f, s] r, s from (select 1 as f, 2 as s) t) t;
++--------+---+
+| EXPR$0 | S |
++--------+---+
+| [1, 2] | 2 |
++--------+---+
+(1 row)
+
+!ok
+
+select any_value(r) over(), s from(select map[f, s] r, s from (select 1 as f, 2 as s) t) t;
++--------+---+
+| EXPR$0 | S |
++--------+---+
+| {1=2}  | 2 |
++--------+---+
+(1 row)
+
+!ok
+
+select any_value(r) over(), s from(select row(f, s) r, s from (select 1 as f, 2 as s) t) t;
++--------+---+
+| EXPR$0 | S |
++--------+---+
+| {1, 2} | 2 |
++--------+---+
+(1 row)
+
+!ok
+
+
+CREATE TABLE complex_t (
+    a INTEGER ARRAY,
+    m MAP<VARCHAR, DOUBLE>,
+    r ROW(r1 VARCHAR, r2 INTEGER, r3 VARCHAR)
+);
+(0 rows modified)
+
+!update
+
+INSERT INTO complex_t VALUES (
+    ARRAY[1, 2, 3, 4, 5],
+    MAP['math', 95.5, 'science', 88.0, 'english', 92.3],
+    ROW('Alice Johnson', 30, 'a')
+),
+(
+    ARRAY[10, 20, 30, 40, 50, 60],
+    MAP['physics', 96.2, 'chemistry', 91.8, 'biology', 89.5, 'computer_science', 98.7],
+    ROW('Bob Smith', 25, 'b')
+),
+(
+    ARRAY[100, 200, 300],
+    MAP['leadership', 88.9, 'teamwork', 94.2, 'communication', 91.5, 'problem_solving', 97.8],
+    ROW('Charlie Chen', 35, 'c')
+);
+(3 rows modified)
+
+!update
+
+select
+    max(a) as max_a,
+    max(m) as max_m,
+    max(r) as max_r,
+    min(a) as min_a,
+    min(m) as min_m,
+    min(r) as min_r
+from complex_t;
++-----------------+----------------------------------------------------------------------------------------------+-----------------------+-----------------+------------------------------------------------------------------------------------------+------------------------+
+| MAX_A           | MAX_M                                                                                        | MAX_R                 | MIN_A           | MIN_M                                                                                    | MIN_R                  |
++-----------------+----------------------------------------------------------------------------------------------+-----------------------+-----------------+------------------------------------------------------------------------------------------+------------------------+
+| [100, 200, 300] | {physics         =96.2, chemistry       =91.8, biology         =89.5, computer_science=98.7} | {Charlie Chen, 35, c} | [1, 2, 3, 4, 5] | {leadership     =88.9, teamwork       =94.2, communication  =91.5, problem_solving=97.8} | {Alice Johnson, 30, a} |
++-----------------+----------------------------------------------------------------------------------------------+-----------------------+-----------------+------------------------------------------------------------------------------------------+------------------------+
+(1 row)
+
+!ok
+
+# Test case for [CALCITE-5578] RelOptRulesTest testAggregateCaseToFilter optimized plan not semantically equivalent to the original one after conversion
+
+CREATE TABLE EMP (
+        EMPNO INTEGER,
+        DEPTNO INTEGER,
+        ENAME VARCHAR(20),
+        JOB VARCHAR(20),
+        MGR INTEGER,
+        HIREDATE DATE,
+        SAL INTEGER,
+        COMM INTEGER,
+        SLACKER INTEGER
+);
+
+(0 rows modified)
+
+!update
+
+INSERT INTO EMP VALUES (0, 70, '-2147483649', '-6721455509335307966', 0, '1970-01-01', 0, 0, 1);
+
+(1 row modified)
+
+!update
+
+select
+ sum(sal) as sum_sal,
+ count(distinct case
+       when job = 'CLERK'
+       then deptno else null end) as count_distinct_clerk,
+ sum(case when deptno = 10 then sal end) as sum_sal_d10,
+ sum(case when deptno = 20 then sal else 0 end) as sum_sal_d20,
+ sum(case when deptno = 30 then 1 else 0 end) as count_d30,
+ count(case when deptno = 40 then 'x' end) as count_d40,
+ sum(case when deptno = 45 then 1 end) as count_d45,
+ sum(case when deptno = 50 then 1 else null end) as count_d50,
+ sum(case when deptno = 60 then null end) as sum_null_d60,
+ sum(case when deptno = 70 then null else 1 end) as sum_null_d70,
+ count(case when deptno = 20 then 1 end) as count_d20
+from emp;
++---------+----------------------+-------------+-------------+-----------+-----------+-----------+-----------+--------------+--------------+-----------+
+| SUM_SAL | COUNT_DISTINCT_CLERK | SUM_SAL_D10 | SUM_SAL_D20 | COUNT_D30 | COUNT_D40 | COUNT_D45 | COUNT_D50 | SUM_NULL_D60 | SUM_NULL_D70 | COUNT_D20 |
++---------+----------------------+-------------+-------------+-----------+-----------+-----------+-----------+--------------+--------------+-----------+
+|       0 |                    0 |             |           0 |         0 |         0 |           |           |              |              |         0 |
++---------+----------------------+-------------+-------------+-----------+-----------+-----------+-----------+--------------+--------------+-----------+
+(1 row)
+
+!ok
+
+# Test same sql after apply AGGREGATE_CASE_TO_FILTER
+
+SELECT SUM("SAL") AS "SUM_SAL", COUNT(DISTINCT "DEPTNO") FILTER (WHERE "JOB" = 'CLERK' IS TRUE) AS "COUNT_DISTINCT_CLERK", SUM("SAL") FILTER (WHERE CAST("DEPTNO" AS INTEGER) = 10 IS TRUE) AS "SUM_SAL_D10", SUM(CASE WHEN CAST("DEPTNO" AS INTEGER) = 20 THEN CAST("SAL" AS DECIMAL(12, 2)) ELSE 0.00 END) AS "SUM_SAL_D20", SUM(CASE WHEN CAST("DEPTNO" AS INTEGER) = 30 THEN 1 ELSE 0 END) AS "COUNT_D30", COUNT(*) FILTER (WHERE CAST("DEPTNO" AS INTEGER) = 40 IS TRUE) AS "COUNT_D40", SUM(1) FILTER (WHERE CAST("DEPTNO" AS INTEGER) = 45 IS TRUE) AS "COUNT_D45", SUM(1) FILTER (WHERE CAST("DEPTNO" AS INTEGER) = 50 IS TRUE) AS "COUNT_D50", SUM(CAST(NULL AS DECIMAL(19, 9))) AS "SUM_NULL_D60", SUM(1) FILTER (WHERE CAST("DEPTNO" AS INTEGER) = 70 IS NOT TRUE) AS "SUM_NULL_D70", COUNT(*) FILTER (WHERE CAST("DEPTNO" AS INTEGER) = 20 IS TRUE) AS "COUNT_D20"
+FROM "EMP";
++---------+----------------------+-------------+-------------+-----------+-----------+-----------+-----------+--------------+--------------+-----------+
+| SUM_SAL | COUNT_DISTINCT_CLERK | SUM_SAL_D10 | SUM_SAL_D20 | COUNT_D30 | COUNT_D40 | COUNT_D45 | COUNT_D50 | SUM_NULL_D60 | SUM_NULL_D70 | COUNT_D20 |
++---------+----------------------+-------------+-------------+-----------+-----------+-----------+-----------+--------------+--------------+-----------+
+|       0 |                    0 |             |        0.00 |         0 |         0 |           |           |              |              |         0 |
++---------+----------------------+-------------+-------------+-----------+-----------+-----------+-----------+--------------+--------------+-----------+
+(1 row)
+
+!ok
+
+# [CALCITE-4765] Complex correlated EXISTS sub-queries used as scalar subqueries can return wrong results
+CREATE TABLE tmp_emps (
+  empid INTEGER NOT NULL,
+  deptno INTEGER NOT NULL,
+  name VARCHAR(10) NOT NULL,
+  salary DECIMAL(10, 2) NOT NULL,
+  commission INTEGER);
+(0 rows modified)
+
+!update
+INSERT INTO tmp_emps (empid, deptno, name, salary, commission) VALUES
+(100, 10, 'Bill', 10000.00, 1000),
+(200, 20, 'Eric', 8000.00, 500),
+(150, 10, 'Sebastian', 7000.00, NULL),
+(110, 10, 'Theodore', 11500.00, 250),
+(170, 30, 'Theodore', 11500.00, 250),
+(140, 10, 'Sebastian', 7000.00, NULL);
+(6 rows modified)
+
+!update
+select * from tmp_emps e1 where EXISTS(select * from (
+  select e2.deptno from tmp_emps e2
+  where e2.commission = e1.commission) as table3
+where  table3.deptno <> e1.deptno);
++-------+--------+----------+----------+------------+
+| EMPID | DEPTNO | NAME     | SALARY   | COMMISSION |
++-------+--------+----------+----------+------------+
+|   110 |     10 | Theodore | 11500.00 |        250 |
+|   170 |     30 | Theodore | 11500.00 |        250 |
++-------+--------+----------+----------+------------+
+(2 rows)
+
+!ok
+!if (use_old_decorr) {
+EnumerableHashJoin(condition=[AND(=($1, $5), =($4, $7))], joinType=[semi])
+  EnumerableTableScan(table=[[BLANK, TMP_EMPS]])
+  EnumerableNestedLoopJoin(condition=[<>($1, $0)], joinType=[inner])
+    EnumerableAggregate(group=[{1}])
+      EnumerableTableScan(table=[[BLANK, TMP_EMPS]])
+    EnumerableCalc(expr#0..4=[{inputs}], expr#5=[IS NOT NULL($t4)], DEPTNO=[$t1], COMMISSION=[$t4], $condition=[$t5])
+      EnumerableTableScan(table=[[BLANK, TMP_EMPS]])
+!plan
+!}
+
+!if (use_new_decorr) {
+EnumerableHashJoin(condition=[AND(IS NOT DISTINCT FROM($1, $5), IS NOT DISTINCT FROM($4, $6))], joinType=[semi])
+  EnumerableTableScan(table=[[BLANK, TMP_EMPS]])
+  EnumerableCalc(expr#0..3=[{inputs}], proj#0..1=[{exprs}])
+    EnumerableHashJoin(condition=[AND(=($1, $3), <>($2, $0))], joinType=[inner])
+      EnumerableAggregate(group=[{1, 4}])
+        EnumerableTableScan(table=[[BLANK, TMP_EMPS]])
+      EnumerableCalc(expr#0..4=[{inputs}], DEPTNO=[$t1], COMMISSION=[$t4])
+        EnumerableTableScan(table=[[BLANK, TMP_EMPS]])
+!plan
+!}
+
+SELECT *, EXISTS(select * from (
+  SELECT e2.deptno FROM tmp_emps e2 where e1.commission = e2.commission) as table3
+  where table3.deptno <> e1.deptno)
+from tmp_emps e1;
++-------+--------+-----------+----------+------------+--------+
+| EMPID | DEPTNO | NAME      | SALARY   | COMMISSION | EXPR$5 |
++-------+--------+-----------+----------+------------+--------+
+|   100 |     10 | Bill      | 10000.00 |       1000 | false  |
+|   110 |     10 | Theodore  | 11500.00 |        250 | true   |
+|   140 |     10 | Sebastian |  7000.00 |            | false  |
+|   150 |     10 | Sebastian |  7000.00 |            | false  |
+|   170 |     30 | Theodore  | 11500.00 |        250 | true   |
+|   200 |     20 | Eric      |  8000.00 |        500 | false  |
++-------+--------+-----------+----------+------------+--------+
+(6 rows)
+
+!ok
+
+!if (use_old_decorr) {
+EnumerableCalc(expr#0..7=[{inputs}], expr#8=[IS NOT NULL($t7)], proj#0..4=[{exprs}], EXPR$5=[$t8])
+  EnumerableMergeJoin(condition=[AND(=($1, $5), =($4, $6))], joinType=[left])
+    EnumerableSort(sort0=[$1], sort1=[$4], dir0=[ASC], dir1=[ASC])
+      EnumerableTableScan(table=[[BLANK, TMP_EMPS]])
+    EnumerableSort(sort0=[$0], sort1=[$1], dir0=[ASC], dir1=[ASC])
+      EnumerableCalc(expr#0..1=[{inputs}], expr#2=[true], DEPTNO0=[$t1], COMMISSION=[$t0], $f2=[$t2])
+        EnumerableAggregate(group=[{1, 2}])
+          EnumerableNestedLoopJoin(condition=[<>($0, $2)], joinType=[inner])
+            EnumerableCalc(expr#0..4=[{inputs}], expr#5=[IS NOT NULL($t4)], DEPTNO=[$t1], COMMISSION=[$t4], $condition=[$t5])
+              EnumerableTableScan(table=[[BLANK, TMP_EMPS]])
+            EnumerableAggregate(group=[{1}])
+              EnumerableTableScan(table=[[BLANK, TMP_EMPS]])
+!plan
+!}
+
+!if (use_new_decorr) {
+EnumerableHashJoin(condition=[AND(IS NOT DISTINCT FROM($1, $5), IS NOT DISTINCT FROM($4, $6))], joinType=[left_mark])
+  EnumerableTableScan(table=[[BLANK, TMP_EMPS]])
+  EnumerableCalc(expr#0..3=[{inputs}], proj#0..1=[{exprs}])
+    EnumerableHashJoin(condition=[AND(=($1, $3), <>($2, $0))], joinType=[inner])
+      EnumerableAggregate(group=[{1, 4}])
+        EnumerableTableScan(table=[[BLANK, TMP_EMPS]])
+      EnumerableCalc(expr#0..4=[{inputs}], DEPTNO=[$t1], COMMISSION=[$t4])
+        EnumerableTableScan(table=[[BLANK, TMP_EMPS]])
+!plan
+!}
 
 # End blank.iq

@@ -16,8 +16,6 @@
  */
 package org.apache.calcite.linq4j.function;
 
-import com.google.common.collect.Lists;
-
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.checkerframework.framework.qual.DefaultQualifier;
 import org.checkerframework.framework.qual.TypeUseLocation;
@@ -25,12 +23,14 @@ import org.checkerframework.framework.qual.TypeUseLocation;
 import java.io.Serializable;
 import java.lang.reflect.Type;
 import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.util.AbstractList;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -538,8 +538,8 @@ public abstract class Functions {
 
   /** Nulls first comparator. */
   private static class NullsFirstComparator
-      implements Comparator<Comparable>, Serializable {
-    @Override public int compare(Comparable o1, Comparable o2) {
+      implements Comparator<Object>, Serializable {
+    @Override public int compare(@Nullable Object o1, @Nullable Object o2) {
       if (o1 == o2) {
         return 0;
       }
@@ -549,8 +549,7 @@ public abstract class Functions {
       if (o2 == null) {
         return 1;
       }
-      //noinspection unchecked
-      return o1.compareTo(o2);
+      return compareListItems(o1, o2);
     }
   }
 
@@ -558,34 +557,14 @@ public abstract class Functions {
   private static class NullsLastComparator
       implements Comparator<Object>, Serializable {
     @Override public int compare(@Nullable Object o1, @Nullable Object o2) {
-      if (o1 == o2) {
-        return 0;
-      }
-      if (o1 == null) {
-        return 1;
-      }
-      if (o2 == null) {
-        return -1;
-      }
-      if (o1 instanceof Comparable && o2 instanceof Comparable) {
-        //noinspection unchecked
-        return ((Comparable) o1).compareTo(o2);
-      } else if (o1 instanceof List && o2 instanceof List) {
-        return compareLists((List<?>) o1, (List<?>) o2);
-      } else if (o1 instanceof Object[] && o2 instanceof Object[]) {
-        final List<Object> list1 = Lists.newArrayList((Object[]) o1);
-        final List<Object> list2 = Lists.newArrayList((Object[]) o2);
-        return compareLists(list1, list2);
-      } else {
-        throw new IllegalArgumentException();
-      }
+      return compareListItems(o1, o2);
     }
   }
 
   /** Nulls first reverse comparator. */
   private static class NullsFirstReverseComparator
       implements Comparator<Object>, Serializable  {
-    @Override public int compare(Object o1, Object o2) {
+    @Override public int compare(@Nullable Object o1, @Nullable Object o2) {
       if (o1 == o2) {
         return 0;
       }
@@ -595,22 +574,14 @@ public abstract class Functions {
       if (o2 == null) {
         return 1;
       }
-      if (o1 instanceof Comparable && o2 instanceof Comparable) {
-        //noinspection unchecked
-        return -((Comparable) o1).compareTo(o2);
-      } else if (o1 instanceof List && o2 instanceof List) {
-        return -compareLists((List<?>) o1, (List<?>) o2);
-      } else if (o1 instanceof Object[] && o2 instanceof Object[]) {
-        final List<Object> list1 = Lists.newArrayList((Object[]) o1);
-        final List<Object> list2 = Lists.newArrayList((Object[]) o2);
-        return -compareLists(list1, list2);
-      } else {
-        throw new IllegalArgumentException();
-      }
+      return -compareListItems(o1, o2);
     }
   }
 
   public static int compareLists(List<?> b0, List<?> b1) {
+    if (b0 == b1) {
+      return 0;
+    }
     if (b0.isEmpty() && b1.isEmpty()) {
       return 0;
     }
@@ -623,10 +594,53 @@ public abstract class Functions {
     return Integer.compare(b0.size(), b1.size());
   }
 
-  private static int compareListItems(@Nullable Object item0, @Nullable Object item1) {
-    if (item0 == null && item1 == null) {
+  /**
+   * Compares two maps.
+   *
+   * <p>Since maps in Calcite are implemented using {@link java.util.LinkedHashMap},
+   * which guarantees insertion order, this method follows DuckDB's behavior by
+   * comparing entries in order. For each entry, it first compares the key and
+   * then the value.
+   */
+  public static int compareMaps(Map<?, ?> b0, Map<?, ?> b1) {
+    if (b0 == b1) {
       return 0;
-    } else if (item0 == null) {
+    }
+    final Iterator<? extends Map.Entry<?, ?>> i0 = b0.entrySet().iterator();
+    final Iterator<? extends Map.Entry<?, ?>> i1 = b1.entrySet().iterator();
+    while (i0.hasNext() && i1.hasNext()) {
+      Map.Entry<?, ?> e0 = i0.next();
+      Map.Entry<?, ?> e1 = i1.next();
+      int c = compareListItems(e0.getKey(), e1.getKey());
+      if (c != 0) {
+        return c;
+      }
+      c = compareListItems(e0.getValue(), e1.getValue());
+      if (c != 0) {
+        return c;
+      }
+    }
+    if (i0.hasNext()) {
+      return 1;
+    }
+    if (i1.hasNext()) {
+      return -1;
+    }
+    return 0;
+  }
+
+  private static BigDecimal toBigDecimal(Number number) {
+    return number instanceof BigDecimal ? (BigDecimal) number
+        : number instanceof BigInteger ? new BigDecimal((BigInteger) number)
+        : number instanceof Long ? new BigDecimal(number.longValue())
+        : new BigDecimal(number.doubleValue());
+  }
+
+  private static int compareListItems(@Nullable Object item0, @Nullable Object item1) {
+    if (item0 == item1) {
+      return 0;
+    }
+    if (item0 == null) {
       return 1;
     } else if (item1 == null) {
       return -1;
@@ -635,27 +649,49 @@ public abstract class Functions {
       final List<?> b0ItemList = (List<?>) item0;
       final List<?> b1ItemList = (List<?>) item1;
       return compareLists(b0ItemList, b1ItemList);
+    } else if (item0 instanceof Map && item1 instanceof Map) {
+      return compareMaps((Map) item0, (Map) item1);
     } else if (item0 instanceof Object[] && item1 instanceof Object[]) {
       return compareObjectArrays((Object[]) item0, (Object[]) item1);
-    } else if (item0.getClass().equals(item1.getClass()) && item0 instanceof Comparable<?>) {
-      final Comparable b0Comparable = (Comparable) item0;
-      final Comparable b1Comparable = (Comparable) item1;
-      return b0Comparable.compareTo(b1Comparable);
+    } else if (item0 instanceof Number && item1 instanceof Number) {
+      final BigDecimal d0 = toBigDecimal((Number) item0);
+      final BigDecimal d1 = toBigDecimal((Number) item1);
+      return d0.compareTo(d1);
+    } else if (item0.getClass().equals(item1.getClass())) {
+      if (item0 instanceof Comparable<?>) {
+        final Comparable b0Comparable = (Comparable) item0;
+        final Comparable b1Comparable = (Comparable) item1;
+        //noinspection unchecked
+        return b0Comparable.compareTo(b1Comparable);
+      }
+      return Objects.equals(item0, item1)
+          ? 0
+          : Integer.compare(System.identityHashCode(item0), System.identityHashCode(item1));
     } else {
-      throw new IllegalArgumentException("Item types do not match");
+      // comparison between objects with different types are possible,
+      // and they always return false
+      return item0.getClass().getName().compareTo(item1.getClass().getName());
     }
   }
 
-  public static int compareObjectArrays(Object[] b0, Object[] b1) {
-    final List<Object> b0List = Lists.newArrayList(b0);
-    final List<Object> b1List = Lists.newArrayList(b1);
-    return compareLists(b0List, b1List);
+  public static int compareObjectArrays(@Nullable Object @Nullable [] b0,
+      @Nullable Object @Nullable [] b1) {
+    if (b0 == b1) {
+      return 0;
+    }
+    if (b0 == null) {
+      return 1;
+    }
+    if (b1 == null) {
+      return -1;
+    }
+    return compareLists(Arrays.asList(b0), Arrays.asList(b1));
   }
 
   /** Nulls last reverse comparator. */
   private static class NullsLastReverseComparator
-      implements Comparator<Comparable>, Serializable  {
-    @Override public int compare(Comparable o1, Comparable o2) {
+      implements Comparator<Object>, Serializable  {
+    @Override public int compare(@Nullable Object o1, @Nullable Object o2) {
       if (o1 == o2) {
         return 0;
       }
@@ -665,8 +701,7 @@ public abstract class Functions {
       if (o2 == null) {
         return -1;
       }
-      //noinspection unchecked
-      return -o1.compareTo(o2);
+      return -compareListItems(o1, o2);
     }
   }
 

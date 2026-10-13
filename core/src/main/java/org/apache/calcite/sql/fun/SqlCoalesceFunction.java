@@ -87,7 +87,7 @@ public class SqlCoalesceFunction extends SqlFunction {
     for (SqlNode operand : Util.skipLast(operands)) {
       whenList.add(
           SqlStdOperatorTable.IS_NOT_NULL.createCall(pos, operand));
-      thenList.add(SqlNode.clone(operand));
+      thenList.add(SqlInternalOperators.CAST_NOT_NULL.createCall(pos, SqlNode.clone(operand)));
     }
     SqlNode elseExpr = Util.last(operands);
     assert call.getFunctionQuantifier() == null;
@@ -120,9 +120,10 @@ public class SqlCoalesceFunction extends SqlFunction {
     }
 
     if (returnType == null) {
-      throw new IllegalArgumentException(
-          "Cannot infer return type for " + opBinding.getOperator() + "; operand types: "
-              + opBinding.collectOperandTypes());
+      throw opBinding.newError(
+          RESOURCE.cannotInferReturnType(
+              opBinding.getOperator().toString(),
+              opBinding.collectOperandTypes().toString()));
     }
 
     return returnType;

@@ -51,6 +51,10 @@ public class SqlDelegatingConformance implements SqlConformance {
     return delegate.isSelectAlias();
   }
 
+  @Override public boolean isNonStrictGroupBy() {
+    return delegate.isNonStrictGroupBy();
+  }
+
   @Override public boolean isGroupByOrdinal() {
     return delegate.isGroupByOrdinal();
   }
@@ -81,6 +85,10 @@ public class SqlDelegatingConformance implements SqlConformance {
 
   @Override public boolean allowHyphenInUnquotedTableName() {
     return delegate.allowHyphenInUnquotedTableName();
+  }
+
+  @Override public boolean isColonFieldAccessAllowed() {
+    return delegate.isColonFieldAccessAllowed();
   }
 
   @Override public boolean isBangEqualAllowed() {
@@ -164,5 +172,9 @@ public class SqlDelegatingConformance implements SqlConformance {
 
   @Override public boolean checkedArithmetic() {
     return delegate.checkedArithmetic();
+  }
+
+  @Override public boolean supportsUnsignedTypes() {
+    return delegate.supportsUnsignedTypes();
   }
 }

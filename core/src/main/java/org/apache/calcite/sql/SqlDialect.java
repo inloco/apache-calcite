@@ -23,6 +23,7 @@ import org.apache.calcite.config.CharLiteralStyle;
 import org.apache.calcite.config.NullCollation;
 import org.apache.calcite.linq4j.function.Experimental;
 import org.apache.calcite.rel.RelFieldCollation;
+import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.core.JoinRelType;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rel.type.RelDataTypeSystem;
@@ -754,6 +755,10 @@ public class SqlDialect {
     return true;
   }
 
+  public boolean supportsOrderByLiteral() {
+    return true;
+  }
+
   public boolean supportsAggregateFunction(SqlKind kind) {
     switch (kind) {
     case LITERAL_AGG:
@@ -794,6 +799,11 @@ public class SqlDialect {
 
   /** Returns whether this dialect supports case when return boolean type. */
   public boolean supportBooleanCaseWhen() {
+    return true;
+  }
+
+  /** Returns whether this dialect supports generate 'SELECT *'. */
+  public boolean supportGenerateSelectStar(RelNode relNode) {
     return true;
   }
 
@@ -1311,6 +1321,8 @@ public class SqlDialect {
       return SqlConformanceEnum.ORACLE_10;
     case MSSQL:
       return SqlConformanceEnum.SQL_SERVER_2008;
+    case PRESTO:
+      return SqlConformanceEnum.PRESTO;
     default:
       return SqlConformanceEnum.PRAGMATIC_2003;
     }
@@ -1813,4 +1825,22 @@ public class SqlDialect {
           conformance, nullCollation, dataTypeSystem, jethroInfo);
     }
   }
+
+  /**
+   * Returns whether this dialect requires wrapping a nested JOIN in a subquery with <b>mandatory
+   * aliases</b> for both the table and its projected columns.
+   *
+   * <p>Example for ClickHouse (returns true):
+   * <pre>{@code
+   * // Before: ... LEFT JOIN (dept d1 INNER JOIN dept d2 ON ...) AS j ON ...
+   * // After:  ... LEFT JOIN (
+   * //           SELECT d1.deptno AS deptno, d2.loc AS loc ...
+   * //           FROM dept d1 INNER JOIN dept d2 ON ...
+   * //         ) AS t0 ON ...
+   * }</pre>
+   */
+  public boolean shouldWrapNestedJoin(RelNode relNode) {
+    return false;
+  }
+
 }

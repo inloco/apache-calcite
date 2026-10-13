@@ -459,4 +459,6 @@ parser: {
   includeBraces: true
   includeAdditionalDeclarations: false
   includeParsingStringLiteralAsArrayLiteral: false
+  includeIntervalWithoutQualifier: false
+  includeStarExclude: false
 }

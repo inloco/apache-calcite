@@ -15,7 +15,11 @@
  * limitations under the License.
  */
 package org.apache.calcite.test;
+import org.apache.calcite.sql.SqlBasicCall;
 import org.apache.calcite.sql.SqlDialect;
+import org.apache.calcite.sql.SqlKind;
+import org.apache.calcite.sql.SqlNode;
+import org.apache.calcite.sql.SqlSelect;
 import org.apache.calcite.sql.dialect.MysqlSqlDialect;
 import org.apache.calcite.sql.dialect.PostgresqlSqlDialect;
 import org.apache.calcite.sql.dialect.SparkSqlDialect;
@@ -25,6 +29,7 @@ import org.apache.calcite.sql.parser.SqlParserFixture;
 import org.apache.calcite.sql.parser.SqlParserTest;
 import org.apache.calcite.sql.parser.StringAndPos;
 import org.apache.calcite.sql.parser.babel.SqlBabelParserImpl;
+import org.apache.calcite.sql.validate.SqlAbstractConformance;
 import org.apache.calcite.tools.Hoist;
 
 import com.google.common.base.Throwables;
@@ -40,6 +45,7 @@ import java.util.Objects;
 import static org.hamcrest.CoreMatchers.is;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.hasToString;
+import static org.junit.jupiter.api.Assumptions.assumeFalse;
 
 /**
  * Tests the "Babel" SQL parser, that understands all dialects of SQL.
@@ -50,6 +56,14 @@ class BabelParserTest extends SqlParserTest {
     return super.fixture()
         .withTester(new BabelTesterImpl())
         .withConfig(c -> c.withParserFactory(SqlBabelParserImpl.FACTORY));
+  }
+
+  /** Tests that the Babel parser correctly parses a CAST to INTERVAL type
+   * in PostgreSQL dialect. */
+  @Test void testCastToInterval() {
+    SqlParserFixture postgreF = fixture().withDialect(PostgresqlSqlDialect.DEFAULT);
+    postgreF.sql("select cast(x as interval)")
+        .ok("SELECT CAST(\"x\" AS INTERVAL SECOND)");
   }
 
   @Test void testReservedWords() {
@@ -126,6 +140,49 @@ class BabelParserTest extends SqlParserTest {
     postgreF.sql("select 1 as \200_$\251\377 from t")
         .ok("SELECT 1 AS \"\200_$\251\377\"\n"
             + "FROM \"t\"");
+  }
+
+  /** Test case for <a href="https://issues.apache.org/jira/browse/CALCITE-7310">
+   * [CALCITE-7310] Support the syntax SELECT * EXCLUDE(columns)</a>. */
+  @Test void testStarExclude() {
+    final String sql = "select * exclude(empno) from emp";
+    final String expected = "SELECT * EXCLUDE (`EMPNO`)\n"
+        + "FROM `EMP`";
+    sql(sql).ok(expected);
+
+    final String sql2 = "select e.* exclude(e.empno, e.ename, e.job, e.mgr, d.deptno)"
+        + " from emp e join dept d on e.deptno = d.deptno";
+    final String expected2 = "SELECT `E`.* EXCLUDE (`E`.`EMPNO`, `E`.`ENAME`,"
+        + " `E`.`JOB`, `E`.`MGR`, `D`.`DEPTNO`)\n"
+        + "FROM `EMP` AS `E`\n"
+        + "INNER JOIN `DEPT` AS `D` ON (`E`.`DEPTNO` = `D`.`DEPTNO`)";
+    sql(sql2).ok(expected2);
+
+    final String sql3 = "select e.* exclude(e.empno, e.ename, e.job, e.mgr, d.deptno),"
+        + " d.* exclude(d.dname) from emp e join dept d on e.deptno = d.deptno";
+    final String expected3 = "SELECT `E`.* EXCLUDE (`E`.`EMPNO`, `E`.`ENAME`,"
+        + " `E`.`JOB`, `E`.`MGR`, `D`.`DEPTNO`), `D`.* EXCLUDE (`D`.`DNAME`)\n"
+        + "FROM `EMP` AS `E`\n"
+        + "INNER JOIN `DEPT` AS `D` ON (`E`.`DEPTNO` = `D`.`DEPTNO`)";
+    sql(sql3).ok(expected3);
+  }
+
+  /** Test case for <a href="https://issues.apache.org/jira/browse/CALCITE-7532">
+   * [CALCITE-7532] Support the syntax SELECT * REPLACE(expr as column)</a>.
+   * */
+  @Test void testStarReplace() {
+    final String sql = "select * replace(empno + 1 as empno) from emp";
+    final String expected = "SELECT * REPLACE ((`EMPNO` + 1) AS `EMPNO`)\n"
+        + "FROM `EMP`";
+    sql(sql).ok(expected);
+
+    final String sql2 = "select e.* replace(e.empno + 1 as e.empno, e.sal * 2 as e.sal)"
+        + " from emp e join dept d on e.deptno = d.deptno";
+    final String expected2 = "SELECT `E`.* REPLACE ((`E`.`EMPNO` + 1) AS `E`.`EMPNO`,"
+        + " (`E`.`SAL` * 2) AS `E`.`SAL`)\n"
+        + "FROM `EMP` AS `E`\n"
+        + "INNER JOIN `DEPT` AS `D` ON (`E`.`DEPTNO` = `D`.`DEPTNO`)";
+    sql(sql2).ok(expected2);
   }
 
   /** Tests that there are no reserved keywords. */
@@ -255,16 +312,112 @@ class BabelParserTest extends SqlParserTest {
     final String sql = "select -('12' || '.34')::VARCHAR(30)::INTEGER as x\n"
         + "from t";
     final String expected = ""
-        + "SELECT (- ('12' || '.34') :: VARCHAR(30) :: INTEGER) AS `X`\n"
+        + "SELECT (((- ('12' || '.34')) :: VARCHAR(30)) :: INTEGER) AS `X`\n"
         + "FROM `T`";
     sql(sql).ok(expected);
   }
 
+  /**
+   * Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-7475">[CALCITE-7475]
+   * Babel parser allows postfix access after PostgreSQL-style {@code ::} infix cast</a>.
+   *
+   * <p>Verifies that PostgreSQL-style infix cast ({@code ::}) correctly binds
+   * tighter than postfix access operators such as array indexing ({@code []})
+   * and field access ({@code .}).
+   */
+  @Test void testParseInfixCastWithPostfixAccess() {
+    final String sql = "select 'test'::varchar array[1].field";
+
+    // 1. Verify the unparsed SQL string.
+    // Calcite's unparser adds parentheses to reflect the correct AST precedence.
+    final String expected = "SELECT (('test' :: VARCHAR ARRAY)[1].`FIELD`)";
+    sql(sql).ok(expected);
+
+    // 2. Verify the internal AST structure.
+    SqlNode node = sql(sql).node();
+    SqlSelect select = (SqlSelect) node;
+    SqlNode firstItem = select.getSelectList().get(0);
+
+    // The top-level operator should be DOT (.)
+    assertThat(firstItem.getKind(), is(SqlKind.DOT));
+    SqlBasicCall dotCall = (SqlBasicCall) firstItem;
+
+    // The left operand of DOT should be ITEM ([])
+    SqlNode dotLeft = dotCall.operand(0);
+    assertThat(((SqlBasicCall) dotLeft).getOperator().getName(), is("ITEM"));
+
+    // The left operand of ITEM should be the INFIX_CAST (::)
+    SqlNode itemLeft = ((SqlBasicCall) dotLeft).operand(0);
+    assertThat(itemLeft.getKind(), is(SqlKind.CAST));
+
+    // The right operand of CAST should be exactly 'VARCHAR ARRAY' without any subscripts.
+    SqlNode castRight = ((SqlBasicCall) itemLeft).operand(1);
+    assertThat(castRight, hasToString("VARCHAR ARRAY"));
+  }
+
   private void checkParseInfixCast(String sqlType) {
     String sql = "SELECT x::" + sqlType + " FROM (VALUES (1, 2)) as tbl(x,y)";
-    String expected = "SELECT `X` :: " + sqlType.toUpperCase(Locale.ROOT) + "\n"
+    String expected = "SELECT (`X` :: " + sqlType.toUpperCase(Locale.ROOT) + ")\n"
         + "FROM (VALUES (ROW(1, 2))) AS `TBL` (`X`, `Y`)";
     sql(sql).ok(expected);
+  }
+
+  @Test void testPostfixAccessWithInfixCast() {
+    final SqlParserFixture f =
+        fixture().withConformance(new SqlAbstractConformance() {
+          @Override public boolean isColonFieldAccessAllowed() {
+            return true;
+          }
+        });
+
+    // Without parentheses, trailing postfixes after :: are consumed as part of
+    // the type.
+    sql("select v::varchar array[1].field from t")
+        .ok("SELECT ((`V` :: VARCHAR ARRAY)[1].`FIELD`)\nFROM `T`");
+    f.sql("select v:field::varchar array[1].field2 from t")
+        .ok("SELECT (((`V`:`field`) :: VARCHAR ARRAY)[1].`FIELD2`)\nFROM `T`");
+
+    // Parenthesizing the cast lets the same postfixes apply to the cast
+    // result instead.
+    sql("select (v::varchar array)[1].field from t")
+        .ok("SELECT ((`V` :: VARCHAR ARRAY)[1].`FIELD`)\nFROM `T`");
+    f.sql("select (v:field::varchar array)[1].field2 from t")
+        .ok("SELECT (((`V`:`field`) :: VARCHAR ARRAY)[1].`FIELD2`)\nFROM `T`");
+
+    // Postfix access is also accepted directly after :: in ordinary field/item
+    // chains.
+    sql("select v.field::integer,\n"
+        + "  arr[1].field::varchar,\n"
+        + "  v.field.field2::integer,\n"
+        + "  v.field[2]::integer\n"
+        + "from t")
+        .ok("SELECT (`V`.`FIELD` :: INTEGER),"
+            + " ((`ARR`[1].`FIELD`) :: VARCHAR),"
+            + " (`V`.`FIELD`.`FIELD2` :: INTEGER),"
+            + " (`V`.`FIELD`[2] :: INTEGER)\n"
+            + "FROM `T`");
+    f.sql("select v:field::integer,\n"
+            + "  arr[1]:field::varchar,\n"
+            + "  v:field.field2::integer,\n"
+            + "  v:field[2]::integer\n"
+            + "from t")
+        .ok("SELECT ((`V`:`field`) :: INTEGER),"
+            + " ((`ARR`[1]:`field`) :: VARCHAR),"
+            + " ((`V`:`field`.`field2`) :: INTEGER),"
+            + " ((`V`:`field`[2]) :: INTEGER)\n"
+            + "FROM `T`");
+
+    // Deep mixed path: dotted identifiers, string-bracket key, integer-bracket
+    // index, and a trailing infix cast in a single expression.
+    f.sql("select v:a.b['c'][0]::integer from t")
+        .ok("SELECT ((`V`:`a`.`b`['c'][0]) :: INTEGER)\nFROM `T`");
+    f.sql("select v:['a'].b[0]['c']::varchar from t")
+        .ok("SELECT ((`V`:['a'].`b`[0]['c']) :: VARCHAR)\nFROM `T`");
+
+    // Double-colon followed by colon field access is not allowed
+    f.sql("select v::variant^:^field from t")
+        .fails("(?s).*Encountered \":.*\".*");
   }
 
   /** Tests parsing MySQL-style "<=>" equal operator. */
@@ -382,7 +535,12 @@ class BabelParserTest extends SqlParserTest {
   }
 
   @Test void testPostgresSqlSetOption() {
-    SqlParserFixture f = fixture().withDialect(PostgresqlSqlDialect.DEFAULT);
+    // UnparsingTesterImpl has a check where it unparses a SqlNode into a SQL string
+    // using the calcite dialect, and then parses it back into a SqlNode.
+    // But the SQL string produced by the calcite dialect for `SET` cannot always be parsed back.
+    assumeFalse(fixture().tester.isUnparserTest());
+    SqlParserFixture f = fixture()
+        .withDialect(PostgresqlSqlDialect.DEFAULT);
     f.sql("SET SESSION autovacuum = true")
         .ok("SET \"autovacuum\" = TRUE");
     f.sql("SET SESSION autovacuum = DEFAULT")
@@ -483,6 +641,11 @@ class BabelParserTest extends SqlParserTest {
     f.sql("DISCARD SEQUENCES").same();
     f.sql("DISCARD TEMPORARY").same();
     f.sql("DISCARD TEMP").same();
+  }
+
+  @Test void testColonUnparse() {
+    final SqlParserFixture f = fixture().withDialect(PostgresqlSqlDialect.DEFAULT);
+    f.expression().sql("1::INT").ok("(1 :: INTEGER)");
   }
 
   @Test void testSparkLeftAntiJoin() {

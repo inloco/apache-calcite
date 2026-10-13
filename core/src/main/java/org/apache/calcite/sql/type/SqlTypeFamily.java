@@ -65,6 +65,7 @@ public enum SqlTypeFamily implements RelDataTypeFamily {
   STRING,
   APPROXIMATE_NUMERIC,
   EXACT_NUMERIC,
+  UNSIGNED_NUMERIC,
   DECIMAL,
   INTEGER,
   DATETIME,
@@ -159,6 +160,10 @@ public enum SqlTypeFamily implements RelDataTypeFamily {
     switch (this) {
     case NUMERIC:
       return ImmutableList.of(NUMERIC);
+    case INTERVAL_DAY_TIME:
+      return ImmutableList.of(INTERVAL_DAY_TIME);
+    case INTERVAL_YEAR_MONTH:
+      return ImmutableList.of(INTERVAL_YEAR_MONTH);
     case DATE:
     case TIME:
     case TIMESTAMP:
@@ -201,6 +206,8 @@ public enum SqlTypeFamily implements RelDataTypeFamily {
       return SqlTypeName.APPROX_TYPES;
     case EXACT_NUMERIC:
       return SqlTypeName.EXACT_TYPES;
+    case UNSIGNED_NUMERIC:
+      return SqlTypeName.UNSIGNED_TYPES;
     case INTEGER:
       return SqlTypeName.INT_TYPES;
     case DATETIME:

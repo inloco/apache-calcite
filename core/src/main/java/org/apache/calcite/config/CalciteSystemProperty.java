@@ -138,6 +138,22 @@ public final class CalciteSystemProperty<T> {
   public static final CalciteSystemProperty<Boolean> TOPDOWN_OPT =
       booleanProperty("calcite.planner.topdown.opt", false);
 
+  /** Whether {@link org.apache.calcite.plan.hep.HepPlanner} should enable
+   * large-plan mode by default.
+   *
+   * <p>This property only affects planners that do not call
+   * {@code setLargePlanMode} explicitly. */
+  public static final CalciteSystemProperty<Boolean> HEP_PLANNER_LARGE_PLAN_MODE =
+      booleanProperty("calcite.hep.large.plan.mode", false);
+
+
+  /** Whether to disable generate rel data type digest string.
+   *
+   * <p> Disable generate rel data type digest string for every type can
+   * reduce composite type's digest memory and digest relative operation's latency. */
+  public static final CalciteSystemProperty<Boolean> DISABLE_GENERATE_REL_DATA_TYPE_DIGEST_STRING =
+      booleanProperty("calcite.disable.generate.rel.data.type.digest.string", false);
+
   /**
    * Whether to run integration tests.
    */
@@ -438,6 +454,24 @@ public final class CalciteSystemProperty<T> {
    */
   public static final CalciteSystemProperty<Integer> JOIN_SELECTOR_COMPACT_CODE_THRESHOLD =
       intProperty("calcite.join.selector.compact.code.threshold", 100);
+
+  /**
+   * Comma-separated patterns to add to the built-in denylist of class
+   * names that may not be loaded by reflection from a Calcite model
+   * (user-defined functions, custom schemas/tables, JDBC drivers,
+   * dialect factories, lattice statistic providers).
+   *
+   * <p>Setting this property <em>extends</em> the built-in denylist; the
+   * built-in entries cannot be removed at runtime.
+   *
+   * <p>Pattern syntax: a pattern ending in {@code "."} matches any class
+   * in that package or its sub-packages; otherwise the pattern matches a
+   * class name exactly.
+   *
+   * @see org.apache.calcite.model.ModelHandler
+   */
+  public static final CalciteSystemProperty<String> MODEL_CLASSES_DENIED =
+      stringProperty("calcite.model.classes.denied", "");
 
   private static CalciteSystemProperty<Boolean> booleanProperty(String key,
       boolean defaultValue) {

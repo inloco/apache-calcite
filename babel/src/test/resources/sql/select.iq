@@ -107,4 +107,229 @@ select 1.0 % 2;
 
 !ok
 
+# [CALCITE-7310] Support the syntax SELECT * EXCLUDE(columns)
+select * exclude(empno, ename, job, mgr) from emp limit 1;
++------------+--------+------+--------+
+| HIREDATE   | SAL    | COMM | DEPTNO |
++------------+--------+------+--------+
+| 1980-12-17 | 800.00 |      |     20 |
++------------+--------+------+--------+
+(1 row)
+
+!ok
+
+select * exclude(empno, ename, job, mgr, mgr) from emp limit 1;
++------------+--------+------+--------+
+| HIREDATE   | SAL    | COMM | DEPTNO |
++------------+--------+------+--------+
+| 1980-12-17 | 800.00 |      |     20 |
++------------+--------+------+--------+
+(1 row)
+
+!ok
+
+select e.*, d.* from emp e join dept d on e.deptno = d.deptno limit 1;
++-------+-------+---------+------+------------+---------+------+--------+---------+------------+----------+
+| EMPNO | ENAME | JOB     | MGR  | HIREDATE   | SAL     | COMM | DEPTNO | DEPTNO0 | DNAME      | LOC      |
++-------+-------+---------+------+------------+---------+------+--------+---------+------------+----------+
+|  7782 | CLARK | MANAGER | 7839 | 1981-06-09 | 2450.00 |      |     10 |      10 | ACCOUNTING | NEW YORK |
++-------+-------+---------+------+------------+---------+------+--------+---------+------------+----------+
+(1 row)
+
+!ok
+
+select e.* exclude(e.empno, e.ename, e.job, e.mgr)
+from emp e join dept d on e.deptno = d.deptno limit 1;
++------------+--------+------+--------+
+| HIREDATE   | SAL    | COMM | DEPTNO |
++------------+--------+------+--------+
+| 1980-12-17 | 800.00 |      |     20 |
++------------+--------+------+--------+
+(1 row)
+
+!ok
+
+select e.* exclude(e.empno, e.ename, e.job, e.mgr), d.* exclude(d.dname)
+from emp e join dept d on e.deptno = d.deptno limit 1;
++------------+---------+------+--------+---------+----------+
+| HIREDATE   | SAL     | COMM | DEPTNO | DEPTNO0 | LOC      |
++------------+---------+------+--------+---------+----------+
+| 1981-06-09 | 2450.00 |      |     10 |      10 | NEW YORK |
++------------+---------+------+--------+---------+----------+
+(1 row)
+
+!ok
+
+# Test basic BY clause: SELECT a BY b is sugar for SELECT b, a GROUP BY b ORDER BY b
+select ename, empno by deptno from emp;
++--------+--------+-------+
+| DEPTNO | ENAME  | EMPNO |
++--------+--------+-------+
+|     10 | MILLER |  7934 |
+|     20 | SMITH  |  7902 |
+|     30 | WARD   |  7900 |
++--------+--------+-------+
+(3 rows)
+
+!ok
+
+# Test BY clause with alias
+select ename, empno by deptno as dept from emp;
++------+--------+-------+
+| DEPT | ENAME  | EMPNO |
++------+--------+-------+
+|   10 | MILLER |  7934 |
+|   20 | SMITH  |  7902 |
+|   30 | WARD   |  7900 |
++------+--------+-------+
+(3 rows)
+
+!ok
+
+# Test BY clause with DESC modifier
+select ename, empno by deptno DESC from emp;
++--------+--------+-------+
+| DEPTNO | ENAME  | EMPNO |
++--------+--------+-------+
+|     30 | WARD   |  7900 |
+|     20 | SMITH  |  7902 |
+|     10 | MILLER |  7934 |
++--------+--------+-------+
+(3 rows)
+
+!ok
+
+# Test BY clause with multiple columns
+select ename, empno by deptno, job from emp;
++--------+-----------+--------+-------+
+| DEPTNO | JOB       | ENAME  | EMPNO |
++--------+-----------+--------+-------+
+|     10 | CLERK     | MILLER |  7934 |
+|     10 | MANAGER   | CLARK  |  7782 |
+|     10 | PRESIDENT | KING   |  7839 |
+|     20 | ANALYST   | SCOTT  |  7902 |
+|     20 | CLERK     | SMITH  |  7876 |
+|     20 | MANAGER   | JONES  |  7566 |
+|     30 | CLERK     | JAMES  |  7900 |
+|     30 | MANAGER   | BLAKE  |  7698 |
+|     30 | SALESMAN  | WARD   |  7844 |
++--------+-----------+--------+-------+
+(9 rows)
+
+!ok
+
+# Test complex BY clause example from the feature proposal
+SELECT e.ename, e.empno BY d.dname AS dept DESC, e.job AS title
+FROM emp AS e
+  JOIN dept AS d ON e.deptno = d.deptno
+WHERE d.loc = 'CHICAGO';
++-------+----------+-------+-------+
+| DEPT  | TITLE    | ENAME | EMPNO |
++-------+----------+-------+-------+
+| SALES | CLERK    | JAMES |  7900 |
+| SALES | MANAGER  | BLAKE |  7698 |
+| SALES | SALESMAN | WARD  |  7844 |
++-------+----------+-------+-------+
+(3 rows)
+
+!ok
+
+# [CALCITE-7331] Support the alias form SELECT * EXCEPT() for SELECT * EXCLUDE()
+select 1 as x, 2 as y except (select 3 as a, 4 as b);
++---+---+
+| X | Y |
++---+---+
+| 1 | 2 |
++---+---+
+(1 row)
+
+!ok
+
+with t(x, y) as (values(1, 2))
+select 1 as x, 2 as y except (y) from t;
+Non-query expression encountered in illegal context
+!error
+
+with t(x, y) as (values(1, 2))
+select x except (x) from t;
+EXCLUDE/EXCEPT clause must follow a STAR expression
+!error
+
+with t(x, y) as (values(1, 2))
+select * except (x) from t;
++---+
+| Y |
++---+
+| 2 |
++---+
+(1 row)
+
+!ok
+
+select 1 as x, e.* except(e.empno, e.ename, e.job, e.mgr), d.* except(d.dname), 2 as y
+from emp e join dept d on e.deptno = d.deptno limit 1;
++---+------------+---------+------+--------+---------+----------+---+
+| X | HIREDATE   | SAL     | COMM | DEPTNO | DEPTNO0 | LOC      | Y |
++---+------------+---------+------+--------+---------+----------+---+
+| 1 | 1981-06-09 | 2450.00 |      |     10 |      10 | NEW YORK | 2 |
++---+------------+---------+------+--------+---------+----------+---+
+(1 row)
+
+!ok
+
+select d1.* except(d1.dname) from dept d1 except(select d2.* except(d2.dname) from dept d2);
++--------+-----+
+| DEPTNO | LOC |
++--------+-----+
++--------+-----+
+(0 rows)
+
+!ok
+
+# SELECT * REPLACE(expr AS column)
+select * replace(empno + 1 as empno) from emp where empno = 7369;
++-------+-------+-------+------+------------+--------+------+--------+
+| EMPNO | ENAME | JOB   | MGR  | HIREDATE   | SAL    | COMM | DEPTNO |
++-------+-------+-------+------+------------+--------+------+--------+
+|  7370 | SMITH | CLERK | 7902 | 1980-12-17 | 800.00 |      |     20 |
++-------+-------+-------+------+------------+--------+------+--------+
+(1 row)
+
+!ok
+
+select * replace(sal * 2 as sal, upper(ename) as ename) from emp where empno = 7369;
++-------+-------+-------+------+------------+---------+------+--------+
+| EMPNO | ENAME | JOB   | MGR  | HIREDATE   | SAL     | COMM | DEPTNO |
++-------+-------+-------+------+------------+---------+------+--------+
+|  7369 | SMITH | CLERK | 7902 | 1980-12-17 | 1600.00 |      |     20 |
++-------+-------+-------+------+------------+---------+------+--------+
+(1 row)
+
+!ok
+
+select e.* replace(e.empno + 1 as e.empno)
+from emp e join dept d on e.deptno = d.deptno
+where e.empno = 7782;
++-------+-------+---------+------+------------+---------+------+--------+
+| EMPNO | ENAME | JOB     | MGR  | HIREDATE   | SAL     | COMM | DEPTNO |
++-------+-------+---------+------+------------+---------+------+--------+
+|  7783 | CLARK | MANAGER | 7839 | 1981-06-09 | 2450.00 |      |     10 |
++-------+-------+---------+------+------------+---------+------+--------+
+(1 row)
+
+!ok
+
+select empno replace(empno + 1 as empno) from emp;
+REPLACE clause must follow a STAR expression
+!error
+
+select * replace(empno + 1 as foo) from emp;
+SELECT * REPLACE list contains unknown column(s): FOO
+!error
+
+select e.* replace(e.empno + 1 as d.deptno)
+from emp e join dept d on e.deptno = d.deptno;
+SELECT * REPLACE list contains unknown column(s): DEPTNO
+!error
+
 # End select.iq

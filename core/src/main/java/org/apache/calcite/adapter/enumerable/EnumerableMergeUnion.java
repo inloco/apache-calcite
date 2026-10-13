@@ -42,17 +42,24 @@ public class EnumerableMergeUnion extends EnumerableUnion {
   protected EnumerableMergeUnion(RelOptCluster cluster, RelTraitSet traitSet,
       List<RelNode> inputs, boolean all) {
     super(cluster, traitSet, inputs, all);
-    final RelCollation collation = traitSet.getCollation();
-    if (collation == null || collation.getFieldCollations().isEmpty()) {
+    final List<RelCollation> collations = traitSet.getCollations();
+    if (collations.isEmpty() || collations.get(0).getFieldCollations().isEmpty()) {
       throw new IllegalArgumentException("EnumerableMergeUnion with no collation");
     }
     for (RelNode input : inputs) {
-      final RelCollation inputCollation = input.getTraitSet().getCollation();
-      if (inputCollation == null || !inputCollation.satisfies(collation)) {
-        throw new IllegalArgumentException("EnumerableMergeUnion input does "
-            + "not satisfy collation. EnumerableMergeUnion collation: "
-            + collation + ". Input collation: " + inputCollation + ". Input: "
-            + input);
+      // Use getCollations() rather than getTrait() so that we handle the case
+      // where the input's collation slot holds a RelCompositeTrait (multiple
+      // collations).  For each required collation, at least one of the input's
+      // collations must satisfy it.
+      final List<RelCollation> inputCollations = input.getTraitSet().getCollations();
+      for (RelCollation collation : collations) {
+        boolean satisfied = inputCollations.stream().anyMatch(ic -> ic.satisfies(collation));
+        if (!satisfied) {
+          throw new IllegalArgumentException("EnumerableMergeUnion input does "
+              + "not satisfy collation. EnumerableMergeUnion collation: "
+              + collation + ". Input collations: " + inputCollations + ". Input: "
+              + input);
+        }
       }
     }
   }

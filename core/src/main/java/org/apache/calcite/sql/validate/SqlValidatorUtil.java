@@ -67,6 +67,7 @@ import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Iterables;
+import com.google.common.collect.Sets;
 
 import org.checkerframework.checker.nullness.qual.Nullable;
 
@@ -616,6 +617,41 @@ public class SqlValidatorUtil {
     return typeFactory.createStructType(typeList, nameList);
   }
 
+  /**
+   * Returns the type of the result collection produced by a mark join. Taking LEFT_MARK join as an
+   * example, its output is all rows from the left side and creates a new attribute to mark a tuple
+   * as having join partners from right side or not.
+   *
+   * @param typeFactory         Type factory
+   * @param inputType           Type of lhs/rhs of the mark join
+   * @param joinConditionType   Type of the join condition
+   * @param systemFieldList     List of system fields that will be prefixed to output row type;
+   *                            typically empty but must not be null
+   * @return  mark join type
+   */
+  public static RelDataType createMarkJoinType(
+      RelDataTypeFactory typeFactory,
+      RelDataType inputType,
+      RelDataType joinConditionType,
+      List<RelDataTypeField> systemFieldList) {
+    final String markerName =
+        SqlValidatorUtil.uniquify("markCol", Sets.newHashSet(inputType.getFieldNames()),
+            SqlValidatorUtil.EXPR_SUGGESTER);
+    // conceptually the type of marker is a three-valued boolean, but it can be simplified to a
+    // two-valued boolean in specific cases (e.g., rewriting from an EXISTS subquery). Simple
+    // defining the marker type as nullable boolean might cause type mismatch errors after rewriting
+    // some subqueries (such as EXISTS subquery).
+    // When deriving the type of LEFT_MARK join, we no longer know which subquery it was
+    // rewritten from, but that information is implicit in the join condition. For example, after
+    // rewriting and decorrelating an EXISTS (correlated) subquery, the condition will only contain
+    // IS NOT DISTINCT FROM. Therefore, we derive the marker type from the condition.
+    final RelDataType markerType =
+        typeFactory.createStructType(
+            ImmutableList.of(joinConditionType),
+            ImmutableList.of(markerName));
+    return createJoinType(typeFactory, inputType, markerType, null, systemFieldList);
+  }
+
   private static void addFields(List<RelDataTypeField> fieldList,
       List<RelDataType> typeList, List<String> nameList,
       Set<String> uniqueNames) {
@@ -772,6 +808,39 @@ public class SqlValidatorUtil {
       fields.add(type.getFieldList().get(field.getIndex()));
     }
     return typeFactory.createStructType(fields);
+  }
+
+  /**
+   * Returns whether there are empty groups in the GROUP BY clause. The final grouping sets of
+   * GROUP BY clause is the result of the cartesian product of group items. Therefore, the GROUP BY
+   * clause contains empty groups only if each group item contains empty groups.
+   *
+   * @param groupClause Group items in GROUP BY clause
+   * @return Whether there are empty groups in GROUP BY clause
+   */
+  public static boolean hasEmptyGroup(List<SqlNode> groupClause) {
+    for (SqlNode groupItem : groupClause) {
+      switch (groupItem.getKind()) {
+      case ROLLUP:
+      case CUBE:
+        break;
+      case GROUPING_SETS:
+        boolean atLeastOneEmptyGroup = false;
+        for (SqlNode groupingSetsItem : ((SqlBasicCall) groupItem).getOperandList()) {
+          atLeastOneEmptyGroup |= hasEmptyGroup(ImmutableList.of(groupingSetsItem));
+        }
+        if (atLeastOneEmptyGroup) {
+          break;
+        }
+        return false;
+      default:
+        if (groupItem instanceof SqlNodeList && ((SqlNodeList) groupItem).isEmpty()) {
+          break;
+        }
+        return false;
+      }
+    }
+    return true;
   }
 
   /** Analyzes an expression in a GROUP BY clause.

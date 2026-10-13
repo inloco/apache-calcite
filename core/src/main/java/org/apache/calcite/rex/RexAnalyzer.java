@@ -96,6 +96,10 @@ public class RexAnalyzer {
       values.add(0); // 00:00:00.000
       values.add(86_399_000); // 23:59:59.000
       break;
+    case ARRAY:
+    case MAP:
+    case MULTISET:
+      break;
     default:
       throw new AssertionError("don't know values for " + variable
           + " of type " + variable.getType());
@@ -137,6 +141,7 @@ public class RexAnalyzer {
       case M2V:
       case OTHER_FUNCTION:
       case V2M:
+      case ARRAY_VALUE_CONSTRUCTOR:
         ++unsupportedCount;
         return null;
       default:

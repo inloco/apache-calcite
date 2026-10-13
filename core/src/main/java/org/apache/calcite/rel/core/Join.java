@@ -104,7 +104,7 @@ public abstract class Join extends BiRel implements Hintable {
     this.condition = requireNonNull(condition, "condition");
     this.variablesSet = ImmutableSet.copyOf(variablesSet);
     this.joinType = requireNonNull(joinType, "joinType");
-    this.joinInfo = JoinInfo.createWithStrictEquality(left, right, condition);
+    this.joinInfo = JoinInfo.of(left, right, condition);
     this.hints = ImmutableList.copyOf(hints);
   }
 
@@ -152,10 +152,19 @@ public abstract class Join extends BiRel implements Hintable {
     if (!super.isValid(litmus, context)) {
       return false;
     }
-    if (getRowType().getFieldCount()
-        != getSystemFieldList().size()
-        + left.getRowType().getFieldCount()
-        + (joinType.projectsRight() ? right.getRowType().getFieldCount() : 0)) {
+    int expectedFieldCount = left.getRowType().getFieldCount();
+    switch (joinType) {
+    case SEMI:
+    case ANTI:
+      break;
+    case LEFT_MARK:
+      expectedFieldCount += 1;
+      break;
+    default:
+      expectedFieldCount += right.getRowType().getFieldCount();
+      break;
+    }
+    if (getRowType().getFieldCount() != expectedFieldCount) {
       return litmus.fail("field count mismatch");
     }
     if (condition != null) {
@@ -180,6 +189,13 @@ public abstract class Join extends BiRel implements Hintable {
         return litmus.fail(checker.getFailureCount()
             + " failures in condition " + condition);
       }
+    }
+    if (joinType == JoinRelType.LEFT_MARK
+        && joinInfo.nullExclusionFlags.contains(true)
+        && !joinInfo.nonEquiConditions.isEmpty()) {
+      return litmus.fail("Left mark join is produced by rewriting IN/SOME/EXISTS "
+          + "subqueries, it will never contain both not null-safe join keys and non-equi "
+          + "predicates.");
     }
     return litmus.succeed();
   }
@@ -251,6 +267,10 @@ public abstract class Join extends BiRel implements Hintable {
   }
 
   @Override protected RelDataType deriveRowType() {
+    if (joinType == JoinRelType.LEFT_MARK) {
+      return SqlValidatorUtil.createMarkJoinType(getCluster().getTypeFactory(), left.getRowType(),
+          condition.getType(), getSystemFieldList());
+    }
     return SqlValidatorUtil.deriveJoinRowType(left.getRowType(),
         right.getRowType(), joinType, getCluster().getTypeFactory(), null,
         getSystemFieldList());

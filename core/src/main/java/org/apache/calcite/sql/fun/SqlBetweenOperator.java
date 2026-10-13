@@ -39,8 +39,6 @@ import org.apache.calcite.util.Util;
 
 import static org.apache.calcite.util.Static.RESOURCE;
 
-import static java.util.Objects.requireNonNull;
-
 /**
  * Defines the BETWEEN operator.
  *
@@ -114,7 +112,10 @@ public class SqlBetweenOperator extends SqlInfixOperator {
   //~ Methods ----------------------------------------------------------------
 
   @Override public boolean validRexOperands(int count, Litmus litmus) {
-    return litmus.fail("not a rex operator");
+    if (count != 3) {
+      return litmus.fail("wrong operand count {} for {}", count, this);
+    }
+    return litmus.succeed();
   }
 
   /**
@@ -127,14 +128,14 @@ public class SqlBetweenOperator extends SqlInfixOperator {
   }
 
   @Override public SqlOperator not() {
-    return of(negated, flag == Flag.SYMMETRIC);
+    return of(!negated, flag == Flag.SYMMETRIC);
   }
 
   private static SqlBetweenOperator of(boolean negated, boolean symmetric) {
     if (symmetric) {
       return negated
-          ? SqlStdOperatorTable.SYMMETRIC_BETWEEN
-          : SqlStdOperatorTable.SYMMETRIC_NOT_BETWEEN;
+          ? SqlStdOperatorTable.SYMMETRIC_NOT_BETWEEN
+          : SqlStdOperatorTable.SYMMETRIC_BETWEEN;
     } else {
       return negated
           ? SqlStdOperatorTable.NOT_BETWEEN
@@ -150,7 +151,13 @@ public class SqlBetweenOperator extends SqlInfixOperator {
             opBinding.collectOperandTypes());
     RelDataType type =
         ReturnTypes.BOOLEAN_NULLABLE.inferReturnType(newOpBinding);
-    return requireNonNull(type, "inferred BETWEEN element type");
+    if (type == null) {
+      throw opBinding.newError(
+          RESOURCE.cannotInferReturnType(
+              opBinding.getOperator().toString(),
+              opBinding.collectOperandTypes().toString()));
+    }
+    return type;
   }
 
   @Override public String getSignatureTemplate(final int operandsCount) {
