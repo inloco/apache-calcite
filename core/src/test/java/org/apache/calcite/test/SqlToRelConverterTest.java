@@ -986,6 +986,8 @@ class SqlToRelConverterTest extends SqlToRelTestBase {
    * <a href="https://issues.apache.org/jira/browse/CALCITE-6742">[CALCITE-6742]
    * StandardConvertletTable.convertCall loses casts from ROW comparisons</a>. */
   @Test void testStructCast() {
+    // The Incognia fork disables implicit ROW comparison coercion to preserve
+    // direct enumerable compilation of nested ROW/ARRAY values.
     final String sql = "select ROW(1, 'x') = ROW('y', 1)";
     sql(sql).ok();
   }

@@ -1527,7 +1527,9 @@ public class RexToLixTranslator implements RexVisitor<RexToLixTranslator.Result>
    * }
    */
   private Result implementCaseWhen(RexCall call) {
-    final Type returnType = currentStorageType != null
+    // ROW values need their physical storage type; scalar CASE results must keep
+    // their SQL-derived Java type even when the enclosing row stores Objects.
+    final Type returnType = call.getType().isStruct() && currentStorageType != null
         ? currentStorageType : typeFactory.getJavaClass(call.getType());
     final ParameterExpression valueVariable =
         Expressions.parameter(returnType,
