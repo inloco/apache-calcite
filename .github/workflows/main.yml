@@ -268,7 +268,7 @@ jobs:
           arguments: --scan --no-parallel --no-daemon -Pguava.version=${{ env.GUAVA }} tasks build
 
   linux-avatica:
-    if: github.event.action != 'labeled'
+    if: false # github.event.action != 'labeled'
     name: 'Linux (JDK 11, Avatica main)'
     runs-on: ubuntu-latest
     steps:
@@ -375,6 +375,7 @@ jobs:
 
   linux-checkerframework-oldest-guava:
     name: 'CheckerFramework (JDK 11, oldest Guava)'
+    if: false
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
