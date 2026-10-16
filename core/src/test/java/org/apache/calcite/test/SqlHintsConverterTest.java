@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 package org.apache.calcite.test;
+
 import org.apache.calcite.adapter.enumerable.EnumerableConvention;
 import org.apache.calcite.adapter.enumerable.EnumerableHashJoin;
 import org.apache.calcite.adapter.enumerable.EnumerableRules;
@@ -58,6 +59,7 @@ import org.apache.calcite.rel.logical.LogicalSort;
 import org.apache.calcite.rel.logical.LogicalUnion;
 import org.apache.calcite.rel.logical.LogicalValues;
 import org.apache.calcite.rel.rules.CoreRules;
+import org.apache.calcite.rel.rules.ProjectToWindowRule;
 import org.apache.calcite.sql.SqlDelete;
 import org.apache.calcite.sql.SqlInsert;
 import org.apache.calcite.sql.SqlMerge;
@@ -78,6 +80,9 @@ import org.immutables.value.Value;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.Execution;
+import org.junit.jupiter.api.parallel.ExecutionMode;
+import org.slf4j.helpers.MessageFormatter;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -104,8 +109,24 @@ import static java.util.Objects.requireNonNull;
 /**
  * Unit test for {@link org.apache.calcite.rel.hint.RelHint}.
  * See {@link RelOptRulesTest} for an explanation of how to add tests.
+ * Run on one thread, because the ErrorInterceptor below is not thread-safe.
  */
+@Execution(ExecutionMode.SAME_THREAD)
 class SqlHintsConverterTest {
+  /**
+   * Mock Litmus class intercepting warning messages
+   * (installed as an errorHandler on HintTools.HINT_STRATEGY_TABLE
+   */
+  static class ErrorInterceptor implements Litmus {
+    public final List<String> messages = new ArrayList<>();
+
+    @Override public boolean fail(@Nullable String message, @Nullable Object... args) {
+      this.messages.add(MessageFormatter.arrayFormat(message, args).getMessage());
+      return false;
+    }
+  };
+
+  static final ErrorInterceptor HANDLER = new ErrorInterceptor();
 
   static final Fixture FIXTURE =
       new Fixture(SqlTestFactory.INSTANCE,
@@ -147,6 +168,24 @@ class SqlHintsConverterTest {
   }
 
   //~ Tests ------------------------------------------------------------------
+
+  /** Test case for <a href="https://issues.apache.org/jira/browse/CALCITE-7498">[CALCITE-7498]
+   * The parser rejects the example hints from the documentation</a>. */
+  @Test void testDocumentationExample() {
+    final String sql = "SELECT /*+ hint1, hint2(a='1', b='2') */ *\n"
+        + "FROM emp /*+ hint3(5, 'x') */\n"
+        + "JOIN dept /*+ hint4(c=id), hint5 */\n"
+        + "ON emp.deptno = dept.deptno";
+    sql(sql).ok();
+  }
+
+  /** Test case for <a href="https://issues.apache.org/jira/browse/CALCITE-7503">[CALCITE-7503]
+   * Hint validation does not have access to source position</a>. */
+  @Test void testPosition() {
+    final String sql = "SELECT /*+ needs_argument */ *\n"
+        + "FROM emp JOIN dept ON emp.deptno = dept.deptno";
+    sql(sql).warns("line 1, column 8: Hint NEEDS_ARGUMENT requires a single option");
+  }
 
   @Test void testQueryHint() {
     final String sql = HintTools.withHint("select /*+ %s */ *\n"
@@ -270,6 +309,29 @@ class SqlHintsConverterTest {
     sql(sql).ok();
   }
 
+  /** Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-7338">[CALCITE-7338]
+   * Window hints are not propagated to window rel nodes</a>. */
+  @Test void testWindowHintsPropagateAfterProjectToWindowRule() {
+    final String sql = "select /*+ mini_batch */ last_value(deptno)\n"
+        + "over (order by empno rows 2 following) from emp";
+
+    // Build rel with the same HintStrategyTable as this class
+    final RelNode rel = sql(sql).toRel();
+
+    // Run the rule that materializes LogicalWindow
+    HepProgramBuilder builder = new HepProgramBuilder();
+    builder.addRuleClass(ProjectToWindowRule.class);
+    HepPlanner planner = new HepPlanner(builder.build());
+    planner.addRule(CoreRules.PROJECT_TO_LOGICAL_PROJECT_AND_WINDOW);
+    planner.setRoot(rel);
+    RelNode transformed = planner.findBestExp();
+
+    // Expect the hint to be on LogicalWindow after the rule.
+    final RelHint expected = RelHint.builder("MINI_BATCH").inheritPath(0).build();
+    new ValidateHintVisitor(expected, Window.class).go(transformed);
+  }
+
   @Test void testHintsInSubQueryWithDecorrelation() {
     final String sql = "select /*+ resource(parallelism='3'), AGG_STRATEGY(TWO_PHASE) */\n"
         + "sum(e1.empno) from emp e1, dept d1\n"
@@ -329,13 +391,6 @@ class SqlHintsConverterTest {
     final String error2 = "Hint AGG_STRATEGY only allows single option, "
         + "allowed options: [ONE_PHASE, TWO_PHASE]";
     sql(sql2).warns(error2);
-    // Change the error handler to validate again.
-    sql(sql2).withFactory(f ->
-        f.withSqlToRelConfig(c ->
-            c.withHintStrategyTable(
-                HintTools.createHintStrategies(
-                    HintStrategyTable.builder().errorHandler(Litmus.THROW)))))
-        .fails(error2);
   }
 
   @Test void testTableHintsInJoin() {
@@ -821,16 +876,9 @@ class SqlHintsConverterTest {
     }
 
     void warns(String expectWarning) {
-      MockAppender appender = new MockAppender();
-      MockLogger logger = new MockLogger();
-      logger.addAppender(appender);
-      try {
-        tester.convertSqlToRel(factory, sql, decorrelate, trim);
-      } finally {
-        logger.removeAppender(appender);
-      }
-      appender.loggingEvents.add(expectWarning); // TODO: remove
-      assertThat(expectWarning, is(in(appender.loggingEvents)));
+      HANDLER.messages.clear();
+      tester.convertSqlToRel(factory, sql, decorrelate, trim);
+      assertThat(expectWarning, is(in(HANDLER.messages)));
     }
 
     SqlNode parseQuery() throws Exception {
@@ -948,25 +996,6 @@ class SqlHintsConverterTest {
     }
   }
 
-  /** Mock appender to collect the logging events. */
-  private static class MockAppender {
-    final List<String> loggingEvents = new ArrayList<>();
-
-    void append(String event) {
-      loggingEvents.add(event);
-    }
-  }
-
-  /** An utterly useless Logger; a placeholder so that the test compiles and
-   * trivially succeeds. */
-  private static class MockLogger {
-    void addAppender(MockAppender appender) {
-    }
-
-    void removeAppender(MockAppender appender) {
-    }
-  }
-
   /** Define some tool members and methods for hints test. */
   private static class HintTools {
     //~ Static fields/initializers ---------------------------------------------
@@ -1024,6 +1053,13 @@ class SqlHintsConverterTest {
                     "Hint {} only allows single option, "
                         + "allowed options: [ONE_PHASE, TWO_PHASE]",
                     hint.hintName)).build())
+          .hintStrategy("needs_argument",
+              HintStrategy.builder(HintPredicates.PROJECT)
+                  .optionChecker(
+                      (hint, errorHandler) -> errorHandler.check(
+                          hint.listOptions.size() == 1,
+                          "{}: Hint {} requires a single option",
+                          hint.pos.toString(), hint.hintName)).build())
         .hintStrategy("use_hash_join",
           HintPredicates.or(
               HintPredicates.and(HintPredicates.CORRELATE, temporalJoinWithFixedTableName()),
@@ -1040,6 +1076,13 @@ class SqlHintsConverterTest {
               .hintStrategy(
                   "preserved_project", HintStrategy.builder(
                HintPredicates.PROJECT).excludedRules(CoreRules.FILTER_PROJECT_TRANSPOSE).build())
+          // meaningless hints for the example in the documentation
+        .hintStrategy("hint1", HintPredicates.JOIN)
+        .hintStrategy("hint2", HintPredicates.JOIN)
+        .hintStrategy("hint3", HintPredicates.TABLE_SCAN)
+        .hintStrategy("hint4", HintPredicates.TABLE_SCAN)
+        .hintStrategy("hint5", HintPredicates.TABLE_SCAN)
+        .errorHandler(HANDLER)
         .build();
     }
 

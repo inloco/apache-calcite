@@ -18,6 +18,27 @@
 !use scott-postgresql
 !set outputformat csv
 
+# Test CAST INTERVAL
+select CAST('3723' AS INTERVAL HOUR TO SECOND);
+EXPR$0
++1:02:03.000000
+!ok
+
+select CAST('3721' AS INTERVAL SECOND);
+EXPR$0
++3721.000000
+!ok
+
+select CAST('2' AS INTERVAL);
+EXPR$0
++2.000000
+!ok
+
+select CAST('-3723' AS INTERVAL);
+EXPR$0
+-3723.000000
+!ok
+
 # Test string and array comparison
 select array[0,1,2] = '{0,1,2}';
 EXPR$0
@@ -39,7 +60,7 @@ EXPR$0
 false
 !ok
 
-#Test string function split_part
+#Test string function split_part, validated on Postgres
 select split_part('abc~@~def~@~ghi', '~@~', 2);
 EXPR$0
 def
@@ -48,6 +69,41 @@ def
 select split_part('abc,def,ghi,jkl', ',', -2);
 EXPR$0
 ghi
+!ok
+
+select split_part('abc.def', '.', 1);
+EXPR$0
+abc
+!ok
+
+select split_part('abc.def', '', 1);
+EXPR$0
+abc.def
+!ok
+
+select split_part('abc.def', '', 2);
+EXPR$0
+
+!ok
+
+select split_part(NULL, '.', 1);
+EXPR$0
+null
+!ok
+
+select split_part(NULL, NULL, NULL);
+EXPR$0
+null
+!ok
+
+select split_part('abc.abc', '.', NULL);
+EXPR$0
+null
+!ok
+
+select split_part('abc', NULL, 1);
+EXPR$0
+null
 !ok
 
 # Test string_to_array function

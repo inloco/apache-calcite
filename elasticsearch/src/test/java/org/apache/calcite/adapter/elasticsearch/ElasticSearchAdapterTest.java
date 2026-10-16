@@ -23,7 +23,6 @@ import org.apache.calcite.schema.SchemaPlus;
 import org.apache.calcite.schema.impl.ViewTable;
 import org.apache.calcite.test.CalciteAssert;
 import org.apache.calcite.test.ElasticsearchChecker;
-import org.apache.calcite.util.Bug;
 import org.apache.calcite.util.TestUtil;
 
 import org.apache.http.HttpHost;
@@ -33,7 +32,6 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.io.LineProcessor;
 import com.google.common.io.Resources;
 
-import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.parallel.ResourceAccessMode;
@@ -163,6 +161,24 @@ class ElasticSearchAdapterTest {
         .returnsCount(0);
   }
 
+  /** Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-6386">[CALCITE-6386]
+   * NPE when using ES adapter with model.json and no specified username, password
+   * or pathPrefix</a>. */
+  @Test void testConnectNoSpecifiedUserOrpathPrefix() throws SQLException {
+    Connection connection = DriverManager.getConnection("jdbc:calcite:lex=JAVA");
+    final CalciteConnection calciteConnection = connection.unwrap(CalciteConnection.class);
+    final ElasticsearchSchemaFactory esSchemaFactory = new ElasticsearchSchemaFactory();
+
+    Map<String, Object> options = new HashMap<>();
+    String coordinates = String.format(Locale.ROOT, "[\"%s\"]", NODE.httpHost());
+    options.put("hosts", coordinates);
+
+    final Schema esSchmea =
+        esSchemaFactory.create(calciteConnection.getRootSchema(), "elasticsearch", options);
+    assertNotNull(esSchmea);
+  }
+
   @Test void testDisableSSL() throws SQLException {
     Connection connection =
         DriverManager.getConnection("jdbc:calcite:lex=JAVA");
@@ -188,6 +204,8 @@ class ElasticSearchAdapterTest {
     assertNotNull(esSchmea);
   }
 
+  /** Test for <a href="https://issues.apache.org/jira/browse/CALCITE-7068">[CALCITE-7068]
+   *  ElasticSearch adapter support LIKE operator</a>. */
   @Test void basic() {
     calciteAssert()
         // by default elastic returns max 10 records
@@ -214,11 +232,146 @@ class ElasticSearchAdapterTest {
         .query("select * from elastic.zips where _MAP['CITY'] = 'BROOKLYN'")
         .returnsCount(0);
 
-
     // limit 0
     calciteAssert()
         .query("select * from elastic.zips limit 0")
         .returnsCount(0);
+
+    // test with ESCAPE
+    calciteAssert()
+        // this case would covnert to like 'BRO%IK*', match no one, count is 0
+        .query(
+            "select * from elastic.zips where _MAP['city'] like 'BRO\\%OK%' ESCAPE '\\' limit 10")
+        .returnsOrdered("")
+        .returnsCount(0);
+
+    calciteAssert()
+        // this case would covnert to like 'BRO*IK*', match one result, count is 1
+        .query(
+            "select * from elastic.zips where _MAP['city'] like 'B\\R\\O%OK%' ESCAPE '\\' limit 10")
+        .returnsOrdered(
+
+            "_MAP={id=11226, city=BROOKLYN, loc=[-73.956985, 40.646694], pop=111396, state=NY}")
+        .returnsCount(1);
+
+
+    calciteAssert()
+        // this case would covnert to like 'BROIK*', match one result, count is 1
+        .query(
+            "select * from elastic.zips where _MAP['city'] like 'BRO!OK%' ESCAPE '!' limit 10")
+        .returnsOrdered(
+
+            "_MAP={id=11226, city=BROOKLYN, loc=[-73.956985, 40.646694], pop=111396, state=NY}")
+        .returnsCount(1);
+
+    calciteAssert()
+        // this case would covnert to like 'BR!OIK*', match no one, count is 0
+        .query(
+            "select * from elastic.zips where _MAP['city'] like 'BRO!!OK%' ESCAPE '!' limit 10")
+        .returnsOrdered("")
+        .returnsCount(0);
+
+    // test with %
+    calciteAssert()
+        .query("select * from elastic.zips where _MAP['city'] like 'BROOK%' limit 10")
+        .returnsOrdered(
+            "_MAP={id=11226, city=BROOKLYN, loc=[-73.956985, 40.646694], pop=111396, state=NY}")
+        .returnsCount(1);
+
+    calciteAssert()
+        .query("select * from elastic.zips where _MAP['city'] like '%ROOK%' limit 10")
+        .returnsOrdered(
+            "_MAP={id=11226, city=BROOKLYN, loc=[-73.956985, 40.646694], pop=111396, state=NY}")
+        .returnsCount(1);
+
+    // test with _
+    calciteAssert()
+        .query("select * from elastic.zips where _MAP['city'] like 'BROOKLY_' limit 10")
+        .returnsOrdered(
+            "_MAP={id=11226, city=BROOKLYN, loc=[-73.956985, 40.646694], pop=111396, state=NY}")
+        .returnsCount(1);
+
+    calciteAssert()
+        .query("select * from elastic.zips where _MAP['city'] like 'BROOKL_' limit 10")
+        .returnsOrdered("")
+        .returnsCount(0);
+
+    calciteAssert()
+        .query("select * from elastic.zips where _MAP['city'] like 'BROOKL__' limit 10")
+        .returnsOrdered(
+            "_MAP={id=11226, city=BROOKLYN, loc=[-73.956985, 40.646694], pop=111396, state=NY}")
+        .returnsCount(1);
+
+    calciteAssert()
+        .query("select * from elastic.zips where _MAP['city'] like '_ROOKLY_' limit 10")
+        .returnsOrdered(
+            "_MAP={id=11226, city=BROOKLYN, loc=[-73.956985, 40.646694], pop=111396, state=NY}")
+        .returnsCount(1);
+
+    calciteAssert()
+        .query("select * from elastic.zips where _MAP['city'] like '_ROO*Y_' limit 10")
+        .returnsOrdered(
+            "_MAP={id=11226, city=BROOKLYN, loc=[-73.956985, 40.646694], pop=111396, state=NY}")
+        .returnsCount(1);
+  }
+
+
+  /**
+   * A test for ReplaceWildcard with escape.
+   */
+  @Test void testReplaceWildcard() {
+    HashMap<String, String> kv = new HashMap<>();
+    kv.put("%", "*");
+    kv.put("_", "?");
+
+    String value = "aa\\%b%";
+    String source = "%";
+    String target = "*";
+    String escape = "\\";
+    assertEquals(QueryBuilders.RegexpQueryBuilder.replaceWildcard(value, kv, escape),
+        "aa%b*");
+
+    value = "aa\\\\%b%";
+    source = "%";
+    target = "*";
+    escape = "\\";
+    assertEquals(QueryBuilders.RegexpQueryBuilder.replaceWildcard(value, kv, escape),
+        "aa\\*b*");
+
+    value = "aa\\\\\\%b%";
+    source = "%";
+    target = "*";
+    escape = "\\";
+    assertEquals(QueryBuilders.RegexpQueryBuilder.replaceWildcard(value, kv, escape),
+        "aa\\%b*");
+
+    value = "aa!%b%";
+    source = "%";
+    target = "*";
+    escape = "!";
+    assertEquals(QueryBuilders.RegexpQueryBuilder.replaceWildcard(value, kv, escape),
+        "aa%b*");
+
+    value = "aa!!%b%";
+    source = "%";
+    target = "*";
+    escape = "!";
+    assertEquals(QueryBuilders.RegexpQueryBuilder.replaceWildcard(value, kv, escape),
+        "aa!*b*");
+
+    value = "aa!!!!%b%";
+    source = "%";
+    target = "*";
+    escape = "!";
+    assertEquals(QueryBuilders.RegexpQueryBuilder.replaceWildcard(value, kv, escape),
+        "aa!!*b*");
+
+    value = "aa!!!%b%";
+    source = "%";
+    target = "*";
+    escape = "!";
+    assertEquals(QueryBuilders.RegexpQueryBuilder.replaceWildcard(value, kv, escape),
+        "aa!%b*");
   }
 
   @Test void testAlias() {
@@ -439,7 +592,7 @@ class ElasticSearchAdapterTest {
     final String explain = "PLAN=ElasticsearchToEnumerableConverter\n"
         + "  ElasticsearchSort(sort0=[$4], sort1=[$3], dir0=[ASC], dir1=[ASC])\n"
         + "    ElasticsearchProject(city=[CAST(ITEM($0, 'city')):VARCHAR(20)], longitude=[CAST(ITEM(ITEM($0, 'loc'), 0)):FLOAT], latitude=[CAST(ITEM(ITEM($0, 'loc'), 1)):FLOAT], pop=[CAST(ITEM($0, 'pop')):INTEGER], state=[CAST(ITEM($0, 'state')):VARCHAR(2)], id=[CAST(ITEM($0, 'id')):VARCHAR(5)])\n"
-        + "      ElasticsearchFilter(condition=[AND(=(CAST(CAST(ITEM($0, 'state')):VARCHAR(2)):CHAR(2), 'CA'), >=(CAST(ITEM($0, 'pop')):INTEGER, 94000))])\n"
+        + "      ElasticsearchFilter(condition=[AND(=(CAST(ITEM($0, 'state')):VARCHAR(2), 'CA'), >=(CAST(ITEM($0, 'pop')):INTEGER, 94000))])\n"
         + "        ElasticsearchTableScan(table=[[elastic, zips]])\n\n";
     calciteAssert()
         .query(sql)
@@ -473,7 +626,7 @@ class ElasticSearchAdapterTest {
     final String explain = "PLAN=ElasticsearchToEnumerableConverter\n"
         + "  ElasticsearchSort(sort0=[$4], sort1=[$3], dir0=[ASC], dir1=[ASC])\n"
         + "    ElasticsearchProject(city=[CAST(ITEM($0, 'city')):VARCHAR(20)], longitude=[CAST(ITEM(ITEM($0, 'loc'), 0)):FLOAT], latitude=[CAST(ITEM(ITEM($0, 'loc'), 1)):FLOAT], pop=[CAST(ITEM($0, 'pop')):INTEGER], state=[CAST(ITEM($0, 'state')):VARCHAR(2)], id=[CAST(ITEM($0, 'id')):VARCHAR(5)])\n"
-        + "      ElasticsearchFilter(condition=[OR(=(CAST(CAST(ITEM($0, 'state')):VARCHAR(2)):CHAR(2), 'CA'), >=(CAST(ITEM($0, 'pop')):INTEGER, 94000))])\n"
+        + "      ElasticsearchFilter(condition=[OR(=(CAST(ITEM($0, 'state')):VARCHAR(2), 'CA'), >=(CAST(ITEM($0, 'pop')):INTEGER, 94000))])\n"
         + "        ElasticsearchTableScan(table=[[elastic, zips]])\n\n";
     calciteAssert()
         .query(sql)
@@ -496,7 +649,6 @@ class ElasticSearchAdapterTest {
   }
 
   @Test void testFilterSortDesc() {
-    Assumptions.assumeTrue(Bug.CALCITE_4645_FIXED, "CALCITE-4645");
     final String sql = "select * from zips\n"
         + "where pop BETWEEN 95000 AND 100000\n"
         + "order by state desc, pop";
@@ -558,7 +710,7 @@ class ElasticSearchAdapterTest {
   @Test void testFilter() {
     final String explain = "PLAN=ElasticsearchToEnumerableConverter\n"
         + "  ElasticsearchProject(state=[CAST(ITEM($0, 'state')):VARCHAR(2)], city=[CAST(ITEM($0, 'city')):VARCHAR(20)])\n"
-        + "    ElasticsearchFilter(condition=[=(CAST(CAST(ITEM($0, 'state')):VARCHAR(2)):CHAR(2), 'CA')])\n"
+        + "    ElasticsearchFilter(condition=[=(CAST(ITEM($0, 'state')):VARCHAR(2), 'CA')])\n"
         + "      ElasticsearchTableScan(table=[[elastic, zips]])";
 
     calciteAssert()

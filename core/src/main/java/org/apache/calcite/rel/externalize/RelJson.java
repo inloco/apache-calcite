@@ -43,6 +43,8 @@ import org.apache.calcite.rex.RexCorrelVariable;
 import org.apache.calcite.rex.RexDynamicParam;
 import org.apache.calcite.rex.RexFieldAccess;
 import org.apache.calcite.rex.RexFieldCollation;
+import org.apache.calcite.rex.RexLambda;
+import org.apache.calcite.rex.RexLambdaRef;
 import org.apache.calcite.rex.RexLiteral;
 import org.apache.calcite.rex.RexNode;
 import org.apache.calcite.rex.RexOver;
@@ -296,6 +298,15 @@ public class RelJson {
     throw new RuntimeException("input field " + input + " is out of range");
   }
 
+  public Object toJson(SqlParserPos pos) {
+    final Map<String, @Nullable Object> map = jsonBuilder().map();
+    map.put("line", pos.getLineNum());
+    map.put("column", pos.getColumnNum());
+    map.put("end_line", pos.getEndLineNum());
+    map.put("end_column", pos.getEndColumnNum());
+    return map;
+  }
+
   public Object toJson(RelCollationImpl node) {
     final List<Object> list = new ArrayList<>();
     for (RelFieldCollation fieldCollation : node.getFieldCollations()) {
@@ -453,6 +464,8 @@ public class RelJson {
         || value instanceof String
         || value instanceof Boolean) {
       return value;
+    } else if (value instanceof SqlParserPos) {
+      return toJson((SqlParserPos) value);
     } else if (value instanceof RexNode) {
       return toJson((RexNode) value);
     } else if (value instanceof RexWindow) {
@@ -615,10 +628,33 @@ public class RelJson {
       map.put("correl", ((RexCorrelVariable) node).getName());
       map.put("type", toJson(node.getType()));
       return map;
+    case LAMBDA_REF: {
+      RexLambdaRef ref = (RexLambdaRef) node;
+      map = jsonBuilder().map();
+      map.put("index", ref.getIndex());
+      map.put("name", ref.getName());
+      map.put("type", toJson(ref.getType()));
+      return map;
+    }
+    case LAMBDA: {
+      RexLambda lambda = (RexLambda) node;
+      map = jsonBuilder().map();
+      final List<@Nullable Object> parameters = jsonBuilder().list();
+      for (RexLambdaRef param : lambda.getParameters()) {
+        parameters.add(toJson(param));
+      }
+      map.put("op", "lambda");
+      map.put("parameters", parameters);
+      map.put("expression", toJson(lambda.getExpression()));
+      return map;
+    }
     default:
       if (node instanceof RexCall) {
         final RexCall call = (RexCall) node;
         map = jsonBuilder().map();
+        if (call.getParserPosition() != SqlParserPos.ZERO) {
+          map.put("pos", toJson(call.getParserPosition()));
+        }
         map.put("op", toJson(call.getOperator()));
         final List<@Nullable Object> list = jsonBuilder().list();
         for (RexNode operand : call.getOperands()) {
@@ -775,7 +811,7 @@ public class RelJson {
             exclude = RexWindowExclusion.EXCLUDE_NO_OTHER;
           }
           final boolean distinct = get((Map<String, Object>) map, "distinct");
-          return rexBuilder.makeOver(type, operator, rexOperands, partitionKeys,
+          return rexBuilder.makeOver(SqlParserPos.ZERO, type, operator, rexOperands, partitionKeys,
               ImmutableList.copyOf(orderKeys),
               requireNonNull(lowerBound, "lowerBound"),
               requireNonNull(upperBound, "upperBound"),

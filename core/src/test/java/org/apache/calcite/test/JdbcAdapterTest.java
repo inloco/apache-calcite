@@ -21,6 +21,7 @@ import org.apache.calcite.adapter.java.ReflectiveSchema;
 import org.apache.calcite.config.CalciteConnectionProperty;
 import org.apache.calcite.config.Lex;
 import org.apache.calcite.plan.RelOptPlanner;
+import org.apache.calcite.prepare.Prepare;
 import org.apache.calcite.runtime.Hook;
 import org.apache.calcite.test.CalciteAssert.AssertThat;
 import org.apache.calcite.test.CalciteAssert.DatabaseInstance;
@@ -28,12 +29,14 @@ import org.apache.calcite.test.schemata.foodmart.FoodmartSchema;
 import org.apache.calcite.test.schemata.hr.HrSchema;
 import org.apache.calcite.util.Smalls;
 import org.apache.calcite.util.TestUtil;
+import org.apache.calcite.util.TryThreadLocal;
 
 import org.hsqldb.jdbcDriver;
 import org.junit.jupiter.api.Test;
 
 import java.sql.Connection;
 import java.sql.DriverManager;
+import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
@@ -75,6 +78,35 @@ class JdbcAdapterTest {
             || CalciteAssert.DB == DatabaseInstance.POSTGRESQL)
         .planHasSql(jdbcSql)
         .returnsCount(14);
+  }
+
+  /** Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-5161">[CALCITE-5161]
+   * NPE when inserting a null value into a decimal column</a>. */
+  @Test void testInsertNull() {
+    // Insert data with null values
+    CalciteAssert.model(FoodmartSchema.FOODMART_MODEL)
+        .query("insert into \"foodmart\".\"promotion\" "
+            + "values (9999, 111, 'Test', NULL, NULL, NULL, NULL)")
+        .updates(1);
+
+    // Verify data was inserted
+    CalciteAssert.model(FoodmartSchema.FOODMART_MODEL)
+        .query("select \"promotion_id\", \"promotion_district_id\", \"promotion_name\", "
+            + "\"media_type\", \"cost\", \"start_date\", \"end_date\" "
+            + "from \"foodmart\".\"promotion\" where \"promotion_id\" = 9999")
+        .returns("promotion_id=9999; promotion_district_id=111; promotion_name=Test; "
+            + "media_type=null; cost=null; start_date=null; end_date=null\n");
+
+    // Delete the inserted data
+    CalciteAssert.model(FoodmartSchema.FOODMART_MODEL)
+        .query("delete from \"foodmart\".\"promotion\" where \"promotion_id\" = 9999")
+        .updates(1);
+
+    // Verify data was deleted
+    CalciteAssert.model(FoodmartSchema.FOODMART_MODEL)
+        .query("select count(*) as c from \"foodmart\".\"promotion\" where \"promotion_id\" = 9999")
+        .returns("C=0\n");
   }
 
   /** Test case for
@@ -181,23 +213,25 @@ class JdbcAdapterTest {
   }
 
   @Test void testInPlan() {
-    CalciteAssert.model(FoodmartSchema.FOODMART_MODEL)
-        .query("select \"store_id\", \"store_name\" from \"store\"\n"
-            + "where \"store_name\" in ('Store 1', 'Store 10', 'Store 11', 'Store 15', 'Store 16', 'Store 24', 'Store 3', 'Store 7')")
-        .runs()
-        .enable(CalciteAssert.DB == CalciteAssert.DatabaseInstance.HSQLDB)
-        .planHasSql("SELECT \"store_id\", \"store_name\"\n"
-            + "FROM \"foodmart\".\"store\"\n"
-            + "WHERE \"store_name\" IN ('Store 1', 'Store 10', 'Store 11',"
-            + " 'Store 15', 'Store 16', 'Store 24', 'Store 3', 'Store 7')")
-        .returns("store_id=1; store_name=Store 1\n"
-            + "store_id=3; store_name=Store 3\n"
-            + "store_id=7; store_name=Store 7\n"
-            + "store_id=10; store_name=Store 10\n"
-            + "store_id=11; store_name=Store 11\n"
-            + "store_id=15; store_name=Store 15\n"
-            + "store_id=16; store_name=Store 16\n"
-            + "store_id=24; store_name=Store 24\n");
+    try (TryThreadLocal.Memo ignore = Prepare.THREAD_INSUBQUERY_THRESHOLD.push(20)) {
+      CalciteAssert.model(FoodmartSchema.FOODMART_MODEL)
+          .query("select \"store_id\", \"store_name\" from \"store\"\n"
+              + "where \"store_name\" in ('Store 1', 'Store 10', 'Store 11', 'Store 15', 'Store 16', 'Store 24', 'Store 3', 'Store 7')")
+          .runs()
+          .enable(CalciteAssert.DB == CalciteAssert.DatabaseInstance.HSQLDB)
+          .planHasSql("SELECT \"store_id\", \"store_name\"\n"
+              + "FROM \"foodmart\".\"store\"\n"
+              + "WHERE \"store_name\" IN ('Store 1', 'Store 10', 'Store 11',"
+              + " 'Store 15', 'Store 16', 'Store 24', 'Store 3', 'Store 7')")
+          .returns("store_id=1; store_name=Store 1\n"
+              + "store_id=3; store_name=Store 3\n"
+              + "store_id=7; store_name=Store 7\n"
+              + "store_id=10; store_name=Store 10\n"
+              + "store_id=11; store_name=Store 11\n"
+              + "store_id=15; store_name=Store 15\n"
+              + "store_id=16; store_name=Store 16\n"
+              + "store_id=24; store_name=Store 24\n");
+    }
   }
 
   @Test void testEquiJoinPlan() {
@@ -248,7 +282,7 @@ class JdbcAdapterTest {
         .query("select * from dept where deptno not in (select deptno from emp)")
         .explainContains("PLAN=JdbcToEnumerableConverter\n"
             + "  JdbcProject(DEPTNO=[$0], DNAME=[$1], LOC=[$2])\n"
-            + "    JdbcFilter(condition=[OR(=($3, 0), AND(IS NULL($6), >=($4, $3)))])\n"
+            + "    JdbcFilter(condition=[OR(AND(IS NULL($6), >=($4, $3)), =($3, 0))])\n"
             + "      JdbcJoin(condition=[=($0, $5)], joinType=[left])\n"
             + "        JdbcJoin(condition=[true], joinType=[inner])\n"
             + "          JdbcTableScan(table=[[SCOTT, DEPT]])\n"
@@ -263,7 +297,27 @@ class JdbcAdapterTest {
             + "FROM \"SCOTT\".\"EMP\") AS \"t\"\n"
             + "LEFT JOIN (SELECT \"DEPTNO\", TRUE AS \"i\"\n"
             + "FROM \"SCOTT\".\"EMP\"\nGROUP BY \"DEPTNO\") AS \"t0\" ON \"DEPT\".\"DEPTNO\" = \"t0\".\"DEPTNO\"\n"
-            + "WHERE \"t\".\"c\" = 0 OR \"t0\".\"i\" IS NULL AND \"t\".\"ck\" >= \"t\".\"c\"");
+            + "WHERE \"t0\".\"i\" IS NULL AND \"t\".\"ck\" >= \"t\".\"c\" OR \"t\".\"c\" = 0");
+  }
+
+  @Test void testNotPushDownNotIn() {
+    CalciteAssert.model(JdbcTest.SCOTT_MODEL)
+        .query("select * from dept where (deptno, dname) not in (select deptno, ename from emp)")
+        .explainContains("EnumerableNestedLoopJoin(condition=[AND(OR(IS NULL($5),"
+            + " =($0, $5)), OR(IS NULL($6), =($1, $6)))], joinType=[left])\n"
+            + "    EnumerableNestedLoopJoin(condition=[true], joinType=[inner])\n"
+            + "      JdbcToEnumerableConverter\n"
+            + "        JdbcTableScan(table=[[SCOTT, DEPT]])\n"
+            + "      EnumerableAggregate(group=[{}], c=[COUNT()], ck=[COUNT() FILTER $0])\n"
+            + "        JdbcToEnumerableConverter\n"
+            + "          JdbcProject($f2=[OR(IS NOT NULL($7), IS NOT NULL($1))])\n"
+            + "            JdbcTableScan(table=[[SCOTT, EMP]])\n"
+            + "    JdbcToEnumerableConverter\n"
+            + "      JdbcAggregate(group=[{0, 1}], i=[LITERAL_AGG(true)], em=[MAX($2)])\n"
+            + "        JdbcProject(DEPTNO=[$7], ENAME=[CAST($1):VARCHAR(14)],"
+            + " $f2=[AND(IS NOT NULL($7), IS NOT NULL($1))])\n"
+            + "          JdbcFilter(condition=[OR(IS NOT NULL($7), IS NOT NULL($1))])\n"
+            + "            JdbcTableScan(table=[[SCOTT, EMP]])\n\n");
   }
 
   /** Test case for
@@ -1269,7 +1323,7 @@ class JdbcAdapterTest {
             + " SET \"account_id\"=888\n"
             + " WHERE \"store_id\"=666\n";
         final String explain = "PLAN=JdbcToEnumerableConverter\n"
-            + "  JdbcTableModify(table=[[foodmart, expense_fact]], operation=[UPDATE], updateColumnList=[[account_id]], sourceExpressionList=[[888]], flattened=[false])\n"
+            + "  JdbcTableModify(table=[[foodmart, expense_fact]], operation=[UPDATE], updateColumnList=[[account_id]], sourceExpressionList=[[$7]], flattened=[false])\n"
             + "    JdbcProject(store_id=[$0], account_id=[$1], exp_date=[$2], time_id=[$3], category_id=[$4], currency_id=[$5], amount=[$6], EXPR$0=[888])\n"
             + "      JdbcFilter(condition=[=($0, 666)])\n"
             + "        JdbcTableScan(table=[[foodmart, expense_fact]])";
@@ -1405,14 +1459,14 @@ class JdbcAdapterTest {
         + " $f4=['666':VARCHAR(30)], $f5=[666], AMOUNT=[CAST($1):DECIMAL(10, 4) NOT NULL],"
         + " store_id=[$2],"
         + " account_id=[$3], exp_date=[$4], time_id=[$5], category_id=[$6], currency_id=[$7],"
-        + " amount=[$8], AMOUNT0=[$1])\n"
+        + " amount=[$8], AMOUNT0=[CAST($1):DECIMAL(10, 4) NOT NULL])\n"
         + "      JdbcJoin(condition=[=($2, $0)], joinType=[left])\n"
         + "        JdbcValues(tuples=[[{ 666, 42 }]])\n"
         + "        JdbcTableScan(table=[[foodmart, expense_fact]])\n";
     final String jdbcSql = "MERGE INTO \"foodmart\".\"expense_fact\"\n"
         + "USING (VALUES (666, 42)) AS \"t\" (\"STORE_ID\", \"AMOUNT\")\n"
         + "ON \"t\".\"STORE_ID\" = \"expense_fact\".\"store_id\"\n"
-        + "WHEN MATCHED THEN UPDATE SET \"amount\" = \"t\".\"AMOUNT\"\n"
+        + "WHEN MATCHED THEN UPDATE SET \"amount\" = CAST(\"t\".\"AMOUNT\" AS DECIMAL(10, 4))\n"
         + "WHEN NOT MATCHED THEN INSERT (\"store_id\", \"account_id\", \"exp_date\", \"time_id\", "
         + "\"category_id\", \"currency_id\", \"amount\") VALUES \"t\".\"STORE_ID\",\n"
         + "666,\nTIMESTAMP '1997-01-01 00:00:00',\n666,\n'666',\n666,\n"
@@ -1526,6 +1580,120 @@ class JdbcAdapterTest {
             || CalciteAssert.DB == DatabaseInstance.POSTGRESQL)
         .planHasSql(jdbcSql)
         .returnsCount(4);
+  }
+
+  /**
+   * Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-5832">[CALCITE-5832]
+   * CyclicMetadataException thrown in complex JOIN</a>. */
+  @Test void testJdbcCyclicMetadata() throws Exception {
+    final String url = MultiJdbcSchemaJoinTest.TempDb.INSTANCE.getUrl();
+    Connection baseConnection = DriverManager.getConnection(url);
+    Statement baseStmt = baseConnection.createStatement();
+    baseStmt.execute("CREATE TABLE T1 (\n"
+        + "\"contentViewsCount\" INTEGER,\n"
+        + "\"isExpired\" BOOLEAN,\n"
+        + "\"metadataPreviewUrl\" VARCHAR(100),\n"
+        + "\"format\" VARCHAR(100),\n"
+        + "\"description\" VARCHAR(100),\n"
+        + "\"language\" VARCHAR(100),\n"
+        + "\"assetTitle\" VARCHAR(100),\n"
+        + "\"assetType\" VARCHAR(100),\n"
+        + "\"contentType\" VARCHAR(100),\n"
+        + "\"doi\" VARCHAR(100),\n"
+        + "\"crmBpn\" VARCHAR(100),\n"
+        + "PRIMARY KEY(\"doi\"))");
+    baseStmt.execute("CREATE TABLE T2 (\n"
+        + "\"doi\" VARCHAR(100),\n"
+        + "\"industry\" VARCHAR(100),\n"
+        + "PRIMARY KEY(\"doi\", \"industry\"))");
+    baseStmt.execute("CREATE TABLE T3 (\n"
+        + "\"semaphoreId\" VARCHAR(100),\n"
+        + "\"name\" VARCHAR(100),\n"
+        + "\"industryId\" VARCHAR(100),\n"
+        + "PRIMARY KEY(\"semaphoreId\"))");
+    baseStmt.execute("CREATE TABLE T4 (\n"
+        + "\"contentViewsCount\" INTEGER,\n"
+        + "\"CRM_Account_ID\" VARCHAR(100),\n"
+        + "\"CRM_Account_Name\" VARCHAR(100),\n"
+        + "PRIMARY KEY(\"CRM_Account_ID\"))");
+    baseStmt.close();
+    baseConnection.commit();
+
+    Properties info = new Properties();
+    info.put("model",
+        "inline:"
+            + "{\n"
+            + "  version: '1.0',\n"
+            + "  defaultSchema: 'BASEJDBC',\n"
+            + "  schemas: [\n"
+            + "     {\n"
+            + "       type: 'jdbc',\n"
+            + "       name: 'BASEJDBC',\n"
+            + "       jdbcDriver: '" + jdbcDriver.class.getName() + "',\n"
+            + "       jdbcUrl: '" + url + "',\n"
+            + "       jdbcCatalog: null,\n"
+            + "       jdbcSchema: null\n"
+            + "     }\n"
+            + "  ]\n"
+            + "}");
+
+    final Connection calciteConnection =
+        DriverManager.getConnection("jdbc:calcite:", info);
+    final PreparedStatement preparedStatement = calciteConnection
+        .prepareStatement("SELECT \"_metadata.status\", \"doi\", \"industry.title\", "
+            + "\"crm_account.crm_account_name\", \"assettitle\", \"description\", \"assettype\", "
+            + "\"format\", \"contentviewscount\", \"metadatapreviewurl\", \"language\", "
+            + "\"contenttype\", \"isexpired\" FROM (select\n"
+            + "  \"A\".\"contentViewsCount\" \"contentviewscount\",\n"
+            + "  \"A\".\"isExpired\" \"isexpired\",\n"
+            + "  \"A\".\"metadataPreviewUrl\" \"metadatapreviewurl\",\n"
+            + "  \"A\".\"format\" \"format\",\n"
+            + "  \"A\".\"description\" \"description\",\n"
+            + "  \"A\".\"language\" \"language\",\n"
+            + "  \"A\".\"assetTitle\" \"assettitle\",\n"
+            + "  \"A\".\"assetType\" \"assettype\",\n"
+            + "  \"A\".\"contentType\" \"contenttype\",\n"
+            + "  \"A\".\"doi\" \"doi\",\n"
+            + "  null \"_metadata.status\",\n"
+            + "  \"D\".\"industry.title\" \"industry.title\",\n"
+            + "  \"F\".\"crm_account.crm_account_name\" \"crm_account.crm_account_name\"\n"
+            + "from \"T1\" \"A\"\n"
+            + "  left outer join \"T2\" \"B\"\n"
+            + "    on \"A\".\"doi\" = \"B\".\"doi\"\n"
+            + "  left outer join (\n"
+            + "    select\n"
+            + "      \"C\".\"semaphoreId\" \"industry.semaphoreId\",\n"
+            + "      \"C\".\"name\" \"industry.title\"\n"
+            + "    from \"T3\" \"C\"\n"
+            + "  ) \"D\"\n"
+            + "    on \"B\".\"industry\" = \"D\".\"industry.semaphoreId\"\n"
+            + "  left outer join (\n"
+            + "    select\n"
+            + "      \"E\".\"CRM_Account_ID\" \"crm_account.CRM_Account_ID\",\n"
+            + "      \"E\".\"CRM_Account_Name\" \"crm_account.crm_account_name\"\n"
+            + "    from \"T4\" \"E\"\n"
+            + "  ) \"F\"\n"
+            + "    on \"A\".\"crmBpn\" = \"F\".\"crm_account"
+            + ".CRM_Account_ID\")\n"
+            + "WHERE (\"isexpired\" = ?)\n"
+            + "AND (\"language\" IN (?, ?))\n"
+            + "AND (\"contenttype\" IN (?, ?))\n"
+            + "AND (\"doi\" IN (?))\n"
+            + "ORDER BY \"doi\" ASC\n"
+            + "LIMIT 500 OFFSET 0");
+    preparedStatement.setBoolean(1, false);
+    preparedStatement.setString(2, "en");
+    preparedStatement.setString(3, "de");
+    preparedStatement.setString(4, "text/html");
+    preparedStatement.setString(5, "text/plain");
+    preparedStatement.setString(6, "");
+    ResultSet rs = preparedStatement.executeQuery();
+
+    assertThat(rs.next(), is(false));
+
+    rs.close();
+    calciteConnection.close();
   }
 
   /** Acquires a lock, and releases it when closed. */

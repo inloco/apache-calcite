@@ -131,6 +131,11 @@ public interface SqlConformance {
   SelectAliasLookup isSelectAlias();
 
   /**
+   * Allow non-GROUP BY columns in SELECT (MySQL loose mode).
+   */
+  boolean isNonStrictGroupBy();
+
+  /**
    * Whether {@code GROUP BY 2} is interpreted to mean 'group by the 2nd column
    * in the select list'.
    *
@@ -254,6 +259,18 @@ public interface SqlConformance {
    * false otherwise.
    */
   boolean allowHyphenInUnquotedTableName();
+
+  /**
+   * Whether {@code :} is allowed as a field/item access operator.
+   *
+   * <p>If true, expressions such as {@code v:field} and {@code v:['field']}
+   * are accepted. In this mode, {@code JSON_OBJECT} and {@code JSON_OBJECTAGG}
+   * must use the {@code KEY ... VALUE} form rather than {@code :} or
+   * comma-pair syntax.
+   */
+  default boolean isColonFieldAccessAllowed() {
+    return false;
+  }
 
   /**
    * Whether the bang-equal token != is allowed as an alternative to &lt;&gt; in
@@ -527,6 +544,7 @@ public interface SqlConformance {
    * {@link SqlConformanceEnum#ORACLE_12},
    * {@link SqlConformanceEnum#PRESTO},
    * {@link SqlConformanceEnum#SQL_SERVER_2008};
+   * {@link SqlConformanceEnum#BIG_QUERY}
    * false otherwise.
    */
   boolean shouldConvertRaggedUnionTypesToVarying();
@@ -657,4 +675,9 @@ public interface SqlConformance {
    * they terminate with a fatal error on overflow.
    */
   boolean checkedArithmetic();
+
+  /**
+   * True when the unsigned versions of integer types are supported.
+   */
+  boolean supportsUnsignedTypes();
 }

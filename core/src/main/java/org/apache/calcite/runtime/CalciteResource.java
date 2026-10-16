@@ -66,6 +66,9 @@ public interface CalciteResource {
   @BaseMessage("Geo-spatial extensions and the GEOMETRY data type are not enabled")
   ExInst<SqlValidatorException> geometryDisabled();
 
+  @BaseMessage("Support for UNSIGNED data types is not enabled")
+  ExInst<SqlValidatorException> unsignedDisabled();
+
   @BaseMessage("Proj4J EPSG is missing from the classpath; to resolve this problem, download the EPSG data set and agree to its terms of use")
   ExInst<CalciteException> proj4jEpsgIsMissing();
 
@@ -642,6 +645,9 @@ public interface CalciteResource {
   @BaseMessage("''{0}'' is not a valid time frame")
   ExInst<SqlValidatorException> invalidTimeFrame(String a0);
 
+  @BaseMessage("''{0}'' is not a valid time frame in ''{1}''")
+  ExInst<SqlValidatorException> invalidTimeFrameInOperation(String a0, String a1);
+
   @BaseMessage("Cannot INSERT into generated column ''{0}''")
   ExInst<SqlValidatorException> insertIntoAlwaysGenerated(String a0);
 
@@ -800,6 +806,24 @@ public interface CalciteResource {
 
   @BaseMessage("SELECT * requires a FROM clause")
   ExInst<SqlValidatorException> selectStarRequiresFrom();
+
+  @BaseMessage("EXCLUDE/EXCEPT clause must follow a STAR expression")
+  ExInst<CalciteException> selectExcludeRequiresStar();
+
+  @BaseMessage("REPLACE clause must follow a STAR expression")
+  ExInst<CalciteException> selectReplaceRequiresStar();
+
+  @BaseMessage("SELECT * EXCLUDE/EXCEPT list contains unknown column(s): {0}")
+  ExInst<SqlValidatorException> selectStarExcludeListContainsUnknownColumns(String columns);
+
+  @BaseMessage("SELECT * EXCLUDE/EXCEPT list cannot exclude all columns")
+  ExInst<SqlValidatorException> selectStarExcludeCannotExcludeAllColumns();
+
+  @BaseMessage("SELECT * REPLACE list contains unknown column(s): {0}")
+  ExInst<SqlValidatorException> selectStarReplaceListContainsUnknownColumns(String columns);
+
+  @BaseMessage("SELECT * REPLACE list contains duplicate column(s): {0}")
+  ExInst<SqlValidatorException> selectStarReplaceListContainsDuplicateColumns(String columns);
 
   @BaseMessage("Group function ''{0}'' can only appear in GROUP BY clause")
   ExInst<SqlValidatorException> groupFunctionMustAppearInGroupByClause(String funcName);
@@ -1136,7 +1160,7 @@ public interface CalciteResource {
   @BaseMessage("ASOF JOIN MATCH_CONDITION must be a comparison between columns from the two inputs")
   ExInst<SqlValidatorException> asofMatchMustBeComparison();
 
-  @BaseMessage("ASOF JOIN condition must be a conjunction of equality comparisons")
+  @BaseMessage("ASOF JOIN condition must be a conjunction of equality comparisons of columns from both sides")
   ExInst<SqlValidatorException> asofConditionMustBeComparison();
 
   @BaseMessage("ASOF JOIN does not support correlated subqueries")
@@ -1150,4 +1174,25 @@ public interface CalciteResource {
 
   @BaseMessage("Index in ROW type does not have a constant integer or string value")
   ExInst<SqlValidatorException> illegalRowIndex();
+
+  @BaseMessage("Unequal number of entries in ROW expressions")
+  ExInst<SqlValidatorException> unequalRowSizes();
+
+  @BaseMessage("Star is not allowed in ROW constructor outside of query context")
+  ExInst<SqlValidatorException> rowStarNotAllowed();
+
+  @BaseMessage("Cannot infer return type for {0}; operand types: {1}")
+  ExInst<SqlValidatorException> cannotInferReturnType(String operator, String types);
+
+  @BaseMessage("SELECT BY cannot be used with GROUP BY")
+  ExInst<SqlValidatorException> selectByCannotWithGroupBy();
+
+  @BaseMessage("SELECT BY cannot be used with ORDER BY")
+  ExInst<SqlValidatorException> selectByCannotWithOrderBy();
+
+  @BaseMessage("The argument of DESCRIPTOR must be an identifier")
+  ExInst<SqlValidatorException> descriptorMustBeIdentifier();
+
+  @BaseMessage("Duplicate name ''{0}'' in MATCH_RECOGNIZE MEASURE alias list")
+  ExInst<CalciteException> measureAliasDuplicate(String aliasName);
 }

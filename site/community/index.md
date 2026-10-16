@@ -105,7 +105,7 @@ At [Calcite Hybrid Meetup](https://www.meetup.com/apache-calcite/events/30562734
 ## Optimizing Common Table Expressions in Apache Hive with Calcite
 
 At [Calcite Hybrid Meetup](https://www.meetup.com/apache-calcite/events/305627349), February 2025;
-[[sumary](https://github.com/zabetak/slides/blob/master/2025/calcite-meetup-feb/optimizing-common-table-expressions-in-apache-hive-with-calcite.md)],
+[[summary](https://github.com/zabetak/slides/blob/master/2025/calcite-meetup-feb/optimizing-common-table-expressions-in-apache-hive-with-calcite.md)],
 [[slides](https://www.slideshare.net/slideshow/optimizing-common-table-expressions-in-apache-hive-with-calcite/276219213)],
 [[pdf](https://github.com/zabetak/slides/blob/master/2025/calcite-meetup-feb/optimizing-common-table-expressions-in-apache-hive-with-calcite.pdf)],
 [[video](https://www.youtube.com/watch?v=PHm5vZ1A43I&t=6317s)].
@@ -249,6 +249,7 @@ If you have something interesting to share with the community drop us an email o
 consider creating a pull request on GitHub. If you just finished a cool project using Calcite
 consider writing a short article about it for our [news section]({{ site.baseurl }}/news/index.html).
 
+* <a href="https://www.feldera.com/blog/constant-folding-in-calcite">Constant folding in Calcite</a> (Mihai Budiu, 2025)
 * <a href="https://github.com/JiajunBernoulli/calcite-notes">Calcite notes about runnable examples and concise documents</a> (Jiajun Xie, 2024)
 * <a href="https://www.feldera.com/blog/calcite-irs/">Calcite program representations</a> (Mihai Budiu, October 2023)
 * <a href="https://datalore.jetbrains.com/view/notebook/JYTVfn90xYSmv6U5f2NIQR">Building a new Calcite frontend (GraphQL)</a> (Gavin Ray, 2022)

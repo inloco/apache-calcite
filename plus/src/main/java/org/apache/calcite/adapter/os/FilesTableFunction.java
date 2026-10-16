@@ -86,9 +86,28 @@ public class FilesTableFunction {
         // %p file name (including argument)
       }
 
+      /** Wraps {@code path} in single quotes for use in a shell command,
+       * throwing if it contains a single quote. */
+      private String quotePath() {
+        return "'" + validatePath(path) + "'";
+      }
+
+      /** Checks that {@code path} is valid and will not cause mischief. */
+      private String validatePath(String path) {
+        if (path.contains("'")) {
+          throw new IllegalArgumentException(
+              "Path with single quote characters is not supported");
+        }
+        if (path.startsWith("-")) {
+          throw new IllegalArgumentException(
+              "Path with leading dash character is not supported");
+        }
+        return path;
+      }
+
       private Enumerable<String> sourceLinux() {
         final String[] args = {
-            "find", path, "-printf", ""
+            "find", "--", validatePath(path), "-printf", ""
               + "%A@\\0" // access_time
               + "%b\\0" // block_count
               + "%C@\\0" // change_time
@@ -114,12 +133,9 @@ public class FilesTableFunction {
       }
 
       private Enumerable<String> sourceMacOs() {
-        if (path.contains("'")) {
-          // no injection monkey business
-          throw new IllegalArgumentException();
-        }
-        final String[] args = {"/bin/sh", "-c", "find '" + path
-              + "' | xargs stat -f "
+        // BSD stat format specifiers: https://man.freebsd.org/cgi/man.cgi?query=stat
+        final String[] args = {"/bin/sh", "-c", "find -- " + quotePath()
+              + " -print0 | xargs -0 stat -f "
               + "%a%n" // access_time
               + "%b%n" // block_count
               + "%c%n" // change_time
@@ -144,6 +160,46 @@ public class FilesTableFunction {
         return Processes.processLines('\n', args);
       }
 
+      private Enumerable<String> sourceGnuStat() {
+        // GNU stat format specifiers:
+        // https://www.gnu.org/software/coreutils/manual/html_node/stat-invocation.html
+        // format string must have exactly 20 lines per file to match the schema
+        final String[] args = {"/bin/sh", "-c", "find -- " + quotePath()
+              + " -print0 | xargs -0 stat -c '"
+              + "%X\n" // access_time
+              + "%b\n" // block_count
+              + "%Z\n" // change_time
+              + "0\n" // depth: computed later based on path
+              + "%d\n" // device
+              + "filename\n" // filename: computed later from path
+              + "%F\n" // fstype (file system type)
+              + "%G\n" // gname
+              + "%g\n" // gid
+              + "dirname\n" // dir_name: computed later from path
+              + "%i\n\n" // inode (followed by empty line for link)
+              + "%a\n" // perm
+              + "%h\n" // hard
+              + "%n\n" // path
+              + "%s\n" // size
+              + "%Y\n" // mod_time
+              + "%U\n" // user
+              + "%u\n" // uid
+              + "%F'" // type
+        };
+        return Processes.processLines('\n', args);
+      }
+
+      private boolean isGnuStat() {
+        try {
+          // BSD stat doesn't support --version, so we use this to detect GNU stat
+          final String[] args = {"stat", "--version"};
+          return Processes.processLines('\n', args)
+              .any(line -> line.contains("GNU coreutils"));
+        } catch (RuntimeException e) {
+          return false;
+        }
+      }
+
       @Override public Enumerable<@Nullable Object[]> scan(DataContext root) {
         JavaTypeFactory typeFactory = root.getTypeFactory();
         final RelDataType rowType = getRowType(typeFactory);
@@ -154,8 +210,9 @@ public class FilesTableFunction {
         Util.discard(osVersion);
         final Enumerable<String> enumerable;
         switch (osName) {
-        case "Mac OS X": // tested on version 10.12.5
-          enumerable = sourceMacOs();
+        case "Mac OS X": // tested on versions 10.12.5 and 15.6.1
+          // detect GNU vs BSD stat and adapt the format accordingly
+          enumerable = isGnuStat() ? sourceGnuStat() : sourceMacOs();
           break;
         default:
           enumerable = sourceLinux();
@@ -187,7 +244,7 @@ public class FilesTableFunction {
                 }
                 switch (osName) {
                 case "Mac OS X":
-                  // Strip leading "./"
+                  // post-process fields: compute filename, dir_name, depth from path
                   String path = requireNonNull((String) current[14]);
                   if (".".equals(path)) {
                     current[14] = path = "";
@@ -207,12 +264,25 @@ public class FilesTableFunction {
                     current[9] = ""; // dir_name
                   }
 
-                  // Make type values more like those on Linux
-                  final String type = (String) current[19];
-                  current[19] = "/".equals(type) ? "d"
-                      : "".equals(type) || "*".equals(type) ? "f"
-                      : "@".equals(type) ? "l"
-                      : type;
+                  // detect output format: BSD outputs single chars, GNU outputs words
+                  final String type = requireNonNull((String) current[19]);
+                  if (type.length() > 1) {
+                    // GNU stat outputs descriptive types like "regular file", "directory"
+                    current[19] = type.contains("directory") ? "d"
+                        : type.contains("regular") ? "f"
+                        : type.contains("symbolic") ? "l"
+                        : type.contains("block") ? "b"
+                        : type.contains("character") ? "c"
+                        : type.contains("fifo") ? "p"
+                        : type.contains("socket") ? "s"
+                        : "?";
+                  } else {
+                    // BSD stat outputs single characters: "/" "*" "@" or ""
+                    current[19] = "/".equals(type) ? "d"
+                        : "".equals(type) || "*".equals(type) ? "f"
+                        : "@".equals(type) ? "l"
+                        : type;
+                  }
                   break;
                 default:
                   break;

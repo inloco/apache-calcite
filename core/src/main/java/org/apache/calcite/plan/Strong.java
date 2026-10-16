@@ -21,11 +21,13 @@ import org.apache.calcite.rex.RexFieldAccess;
 import org.apache.calcite.rex.RexInputRef;
 import org.apache.calcite.rex.RexLiteral;
 import org.apache.calcite.rex.RexNode;
+import org.apache.calcite.rex.RexSubQuery;
 import org.apache.calcite.rex.RexUnknownAs;
 import org.apache.calcite.rex.RexUtil;
 import org.apache.calcite.rex.RexVisitorImpl;
 import org.apache.calcite.sql.SqlKind;
 import org.apache.calcite.sql.SqlOperator;
+import org.apache.calcite.sql.fun.SqlQuantifyOperator;
 import org.apache.calcite.util.ImmutableBitSet;
 import org.apache.calcite.util.Sarg;
 
@@ -250,6 +252,19 @@ public class Strong {
         return sarg.nullAs == RexUnknownAs.UNKNOWN;
       }
       return false;
+    case SOME:
+    case ALL:
+      final RexCall rexCall = (RexCall) node;
+      // For example:
+      // select NULL > all (select comm from emp where 1 = 0) from emp
+      // return FALSE when the sub-query returns 0 row
+      if (rexCall instanceof RexSubQuery) {
+        return false;
+      }
+      if (rexCall.getOperator() instanceof SqlQuantifyOperator) {
+        return anyNull(rexCall.getOperands());
+      }
+      return false;
     default:
       return false;
     }
@@ -355,6 +370,7 @@ public class Strong {
     map.put(SqlKind.TIMESTAMP_ADD, Policy.ANY);
     map.put(SqlKind.TIMESTAMP_DIFF, Policy.ANY);
     map.put(SqlKind.ITEM, Policy.ANY);
+    map.put(SqlKind.COLON, Policy.ANY);
 
     // Assume that any other expressions cannot be simplified.
     for (SqlKind k

@@ -28,13 +28,24 @@ import org.checkerframework.dataflow.qual.Pure;
 
 import java.util.List;
 
+import static java.util.Objects.requireNonNull;
+
 /**
  * A <code>SqlMerge</code> is a node of a parse tree which represents a MERGE
  * statement.
  */
 public class SqlMerge extends SqlCall {
   public static final SqlSpecialOperator OPERATOR =
-      new SqlSpecialOperator("MERGE", SqlKind.MERGE);
+      new SqlSpecialOperator("MERGE", SqlKind.MERGE) {
+        @Override public SqlCall createCall(final @Nullable SqlLiteral functionQualifier,
+            final SqlParserPos pos,
+            final @Nullable SqlNode... operands) {
+          return new SqlMerge(pos, requireNonNull(operands[0]), requireNonNull(operands[1]),
+              requireNonNull(operands[2]),
+              (SqlUpdate) operands[3], (SqlInsert) operands[4],
+              (SqlSelect) operands[5], (SqlIdentifier) operands[6]);
+        }
+      };
 
   SqlNode targetTable;
   SqlNode condition;
@@ -148,10 +159,19 @@ public class SqlMerge extends SqlCall {
 
   /**
    * Gets the source SELECT expression for the data to be updated/inserted.
-   * Returns null before the statement has been expanded by
-   * {@link SqlValidatorImpl#performUnconditionalRewrites(SqlNode, boolean)}.
    *
-   * @return the source SELECT for the data to be updated
+   * <p>The source SELECT column order:
+   * <ul>
+   *   <li>`WHEN NOT MATCHED THEN INSERT` only: [new values...]</li>
+   *   <li>`WHEN MATCHED THEN UPDATE` only: [old table columns..., updated new values...]</li>
+   *   <li>Both `NOT MATCHED THEN INSERT` and `WHEN MATCHED THEN UPDATE`: [insert new values...,
+   *   old table columns..., updated new values...]</li>
+   * </ul>
+   * Returns null before the statement has been expanded by
+   * {@link SqlValidatorImpl#performUnconditionalRewrites(SqlNode, boolean)} and
+   * {@link SqlValidatorImpl#rewriteMerge(SqlMerge)}.
+   *
+   * @return the source SELECT for the data to be updated/inserted
    */
   public @Nullable SqlSelect getSourceSelect() {
     return sourceSelect;

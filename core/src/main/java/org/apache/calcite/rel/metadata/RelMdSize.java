@@ -25,6 +25,7 @@ import org.apache.calcite.rel.core.Exchange;
 import org.apache.calcite.rel.core.Filter;
 import org.apache.calcite.rel.core.Intersect;
 import org.apache.calcite.rel.core.Join;
+import org.apache.calcite.rel.core.JoinRelType;
 import org.apache.calcite.rel.core.Minus;
 import org.apache.calcite.rel.core.Project;
 import org.apache.calcite.rel.core.Sort;
@@ -45,6 +46,7 @@ import org.apache.calcite.util.NlsString;
 import org.apache.calcite.util.Pair;
 
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.Lists;
 
 import org.checkerframework.checker.nullness.qual.Nullable;
 
@@ -206,14 +208,24 @@ public class RelMdSize implements MetadataHandler<BuiltInMetadata.Size> {
     return averageJoinColumnSizes(rel, mq);
   }
 
-  private static @Nullable List<@Nullable Double> averageJoinColumnSizes(Join rel,
+  private @Nullable List<@Nullable Double> averageJoinColumnSizes(Join rel,
       RelMetadataQuery mq) {
     boolean semiOrAntijoin = !rel.getJoinType().projectsRight();
     final RelNode left = rel.getLeft();
     final RelNode right = rel.getRight();
     final @Nullable List<@Nullable Double> lefts = mq.getAverageColumnSizes(left);
-    final @Nullable List<@Nullable Double> rights =
-        semiOrAntijoin ? null : mq.getAverageColumnSizes(right);
+    final @Nullable List<@Nullable Double> rights;
+    if (semiOrAntijoin) {
+      if (rel.getJoinType() == JoinRelType.LEFT_MARK) {
+        RelDataTypeField markColType =
+            rel.getRowType().getFieldList().get(rel.getRowType().getFieldCount() - 1);
+        rights = Lists.newArrayList(averageFieldValueSize(markColType));
+      } else {
+        rights = null;
+      }
+    } else {
+      rights = mq.getAverageColumnSizes(right);
+    }
     if (lefts == null && rights == null) {
       return null;
     }
@@ -297,10 +309,13 @@ public class RelMdSize implements MetadataHandler<BuiltInMetadata.Size> {
     switch (type.getSqlTypeName()) {
     case BOOLEAN:
     case TINYINT:
+    case UTINYINT:
       return 1d;
     case SMALLINT:
+    case USMALLINT:
       return 2d;
     case INTEGER:
+    case UINTEGER:
     case REAL:
     case DECIMAL:
     case DATE:
@@ -312,6 +327,7 @@ public class RelMdSize implements MetadataHandler<BuiltInMetadata.Size> {
     case INTERVAL_MONTH:
       return 4d;
     case BIGINT:
+    case UBIGINT:
     case DOUBLE:
     case FLOAT: // sic
     case TIMESTAMP:
@@ -362,10 +378,13 @@ public class RelMdSize implements MetadataHandler<BuiltInMetadata.Size> {
     switch (type.getSqlTypeName()) {
     case BOOLEAN:
     case TINYINT:
+    case UTINYINT:
       return 1d;
     case SMALLINT:
+    case USMALLINT:
       return 2d;
     case INTEGER:
+    case UINTEGER:
     case REAL:
     case DATE:
     case TIME:
@@ -376,6 +395,7 @@ public class RelMdSize implements MetadataHandler<BuiltInMetadata.Size> {
     case INTERVAL_MONTH:
       return 4d;
     case BIGINT:
+    case UBIGINT:
     case FLOAT:  // sic
     case DOUBLE:
     case TIMESTAMP:
@@ -403,6 +423,20 @@ public class RelMdSize implements MetadataHandler<BuiltInMetadata.Size> {
     }
   }
 
+  /** Returns size for nested type ARRAY/MAP. */
+  public Double computeSizeForNestedType(RexCall call,
+      List<? extends @Nullable Double> inputColumnSizes) {
+    if (call.operands.size() == 0) {
+      return 0d;
+    }
+    Double compSize = 0d;
+    for (RexNode operand : call.getOperands()) {
+      Double nonNullSize = requireNonNull(averageRexSize(operand, inputColumnSizes));
+      compSize += nonNullSize;
+    }
+    return compSize;
+  }
+
   public @Nullable Double averageRexSize(RexNode node,
       List<? extends @Nullable Double> inputColumnSizes) {
     switch (node.getKind()) {
@@ -418,10 +452,12 @@ public class RelMdSize implements MetadataHandler<BuiltInMetadata.Size> {
         // ARRAY constructor: array size multiplied by the average size of its component type
         if (call.isA(SqlKind.ARRAY_VALUE_CONSTRUCTOR)) {
           assert SqlTypeUtil.isArray(call.getType());
-          Double compSize = averageTypeValueSize(requireNonNull(call.getType().getComponentType()));
-          if (compSize != null) {
-            return compSize * call.operands.size();
-          }
+          return computeSizeForNestedType(call, inputColumnSizes);
+        }
+
+        if (call.isA(SqlKind.MAP_VALUE_CONSTRUCTOR)) {
+          assert SqlTypeUtil.isMap(call.getType());
+          return computeSizeForNestedType(call, inputColumnSizes);
         }
 
         for (RexNode operand : call.getOperands()) {

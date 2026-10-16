@@ -36,6 +36,7 @@ import org.apache.calcite.tools.RelBuilder;
 import org.apache.calcite.tools.RelBuilderFactory;
 
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Sets;
 
 import org.checkerframework.checker.nullness.qual.Nullable;
@@ -72,6 +73,15 @@ public abstract class FilterJoinRule<C extends FilterJoinRule.Config>
 
   protected void perform(RelOptRuleCall call, @Nullable Filter filter,
       Join join) {
+    // Skip non-deterministic filter condition
+    if (filter != null && !RexUtil.isDeterministic(filter.getCondition())) {
+      return;
+    }
+    // Skip non-deterministic join condition
+    if (!RexUtil.isDeterministic(join.getCondition())) {
+      return;
+    }
+
     List<RexNode> joinFilters =
         RelOptUtil.conjunctions(join.getCondition());
     final List<RexNode> origJoinFilters = ImmutableList.copyOf(joinFilters);
@@ -84,7 +94,7 @@ public abstract class FilterJoinRule<C extends FilterJoinRule.Config>
       return;
     }
 
-    final List<RexNode> aboveFilters =
+    List<RexNode> aboveFilters =
         filter != null
             ? getConjunctions(filter)
             : new ArrayList<>();
@@ -101,6 +111,18 @@ public abstract class FilterJoinRule<C extends FilterJoinRule.Config>
 
     final List<RexNode> leftFilters = new ArrayList<>();
     final List<RexNode> rightFilters = new ArrayList<>();
+
+    // Do not consider moving predicates that contain correlation variables
+    final List<RexNode> ineligible = new ArrayList<>();
+    final List<RexNode> eligible = new ArrayList<>();
+    for (RexNode f : aboveFilters) {
+      if (RexUtil.containsCorrelation(f)) {
+        ineligible.add(f);
+      } else {
+        eligible.add(f);
+      }
+    }
+    aboveFilters = eligible;
 
     // TODO - add logic to derive additional filters.  E.g., from
     // (t1.a = 1 AND t2.a = 2) OR (t1.b = 3 AND t2.b = 4), you can
@@ -121,6 +143,8 @@ public abstract class FilterJoinRule<C extends FilterJoinRule.Config>
             leftFilters,
             rightFilters);
 
+    // Add back the ineligible filters
+    aboveFilters.addAll(ineligible);
     // Move join filters up if needed
     validateJoinFilters(aboveFilters, joinFilters, join, joinType);
 
@@ -226,6 +250,7 @@ public abstract class FilterJoinRule<C extends FilterJoinRule.Config>
 
     // create a FilterRel on top of the join if needed
     relBuilder.filter(
+        filter == null ? ImmutableSet.of() : filter.getVariablesSet(),
         RexUtil.fixUp(rexBuilder, aboveFilters,
             RelOptUtil.getFieldTypeList(relBuilder.peek().getRowType())));
     call.transformTo(relBuilder.build());

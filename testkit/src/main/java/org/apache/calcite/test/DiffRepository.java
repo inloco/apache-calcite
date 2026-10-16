@@ -245,8 +245,8 @@ public class DiffRepository {
       }
       this.root = doc.getDocumentElement();
       this.xmlTestCases = analyze(this.root);
-      existsMethodOnlyInXml = checkExists(this.root, javaTestMethods, this.xmlTestCases);
       outOfOrderTests = validateOrder(this.root, this.xmlTestCases);
+      existsMethodOnlyInXml = checkExists(this.root, javaTestMethods, this.xmlTestCases);
     } catch (ParserConfigurationException | SAXException e) {
       throw new RuntimeException("error while creating xml parser", e);
     }
@@ -255,7 +255,7 @@ public class DiffRepository {
   //~ Methods ----------------------------------------------------------------
 
   public void checkActualAndReferenceFiles() {
-    if (existsMethodOnlyInXml) {
+    if (existsMethodOnlyInXml || !outOfOrderTests.isEmpty()) {
       modCount++;
       flushDoc();
     }
@@ -586,7 +586,7 @@ public class DiffRepository {
     int i = 0;
     final List<String> names = Pair.left(map);
     for (String s : names) {
-      if (s.compareToIgnoreCase(testCaseName) <= 0) {
+      if (s.compareTo(testCaseName) <= 0) {
         ++i;
       }
     }
@@ -598,13 +598,13 @@ public class DiffRepository {
     // will end up in exactly the right position, and if the list is not sorted,
     // the new item will end up in approximately the right position.
     while (i < map.size()
-        && names.get(i).compareToIgnoreCase(testCaseName) < 0) {
+        && names.get(i).compareTo(testCaseName) < 0) {
       ++i;
     }
-    if (i >= map.size() - 1) {
+    if (i > map.size() - 1) {
       return null;
     }
-    while (i >= 0 && names.get(i).compareToIgnoreCase(testCaseName) > 0) {
+    while (i >= 0 && names.get(i).compareTo(testCaseName) > 0) {
       --i;
     }
     return map.get(i + 1).right;
@@ -686,12 +686,18 @@ public class DiffRepository {
       SortedMap<String, Node> testCases) {
     String previousName = null;
     final List<String> outOfOrderNames = new ArrayList<>();
-    for (Map.Entry<String, Node> entry : testCases.entrySet()) {
-      String name = entry.getKey();
-      if (previousName != null && previousName.compareTo(name) > 0) {
-        outOfOrderNames.add(name);
+    final NodeList childNodes = root.getChildNodes();
+
+    for (int i = 0; i < childNodes.getLength(); i++) {
+      Node child = childNodes.item(i);
+      if (child.getNodeName().equals(TEST_CASE_TAG)) {
+        Element testCase = (Element) child;
+        String name = testCase.getAttribute(TEST_CASE_NAME_ATTR);
+        if (previousName != null && previousName.compareTo(name) > 0) {
+          outOfOrderNames.add(name);
+        }
+        previousName = name;
       }
-      previousName = name;
     }
 
     // If any nodes were out of order, rebuild the document in sorted order.

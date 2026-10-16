@@ -1004,4 +1004,163 @@ ON t1.a IS NOT DISTINCT FROM t2.a;
 
 !ok
 
+### [CALCITE-4915] Query with unqualified common column and NATURAL JOIN fails
+select deptno, dname, empno, ename
+from "scott".emp
+natural join "scott".dept order by empno;
++--------+------------+-------+--------+
+| DEPTNO | DNAME      | EMPNO | ENAME  |
++--------+------------+-------+--------+
+|     20 | RESEARCH   |  7369 | SMITH  |
+|     30 | SALES      |  7499 | ALLEN  |
+|     30 | SALES      |  7521 | WARD   |
+|     20 | RESEARCH   |  7566 | JONES  |
+|     30 | SALES      |  7654 | MARTIN |
+|     30 | SALES      |  7698 | BLAKE  |
+|     10 | ACCOUNTING |  7782 | CLARK  |
+|     20 | RESEARCH   |  7788 | SCOTT  |
+|     10 | ACCOUNTING |  7839 | KING   |
+|     30 | SALES      |  7844 | TURNER |
+|     20 | RESEARCH   |  7876 | ADAMS  |
+|     30 | SALES      |  7900 | JAMES  |
+|     20 | RESEARCH   |  7902 | FORD   |
+|     10 | ACCOUNTING |  7934 | MILLER |
++--------+------------+-------+--------+
+(14 rows)
+
+!ok
+
+# [CALCITE-6176] JOIN_SUB_QUERY_TO_CORRELATE rule incorrectly handles EXISTS in LEFT JOIN ON clause
+select *
+from (select 1 id) t1
+left join (select 2 id) t2
+on not exists(select *
+               from (select 3 id) p
+               where p.id = t2.id);
++----+-----+
+| ID | ID0 |
++----+-----+
+|  1 |   2 |
++----+-----+
+(1 row)
+
+!ok
+
+select *
+from (select 1 id union all select 2) t1
+left join (select 2 id) t2
+on t1.id = t2.id and not exists(select *
+                                from (select 3 id) p
+                                where p.id = t1.id);
++----+-----+
+| ID | ID0 |
++----+-----+
+|  1 |     |
+|  2 |   2 |
++----+-----+
+(2 rows)
+
+!ok
+
+select *
+from (select 1 id) t1
+left join (select 2 id) t2
+on t1.id = t2.id or exists(select *
+                           from (select 3 id) p
+                           where p.id = t2.id);
++----+-----+
+| ID | ID0 |
++----+-----+
+|  1 |     |
++----+-----+
+(1 row)
+
+!ok
+
+select *
+from (select 1 id) t1
+left join (select 2 id) t2
+on t1.id = t2.id or not exists(select *
+                               from (select 3 id) p
+                               where p.id = t2.id);
++----+-----+
+| ID | ID0 |
++----+-----+
+|  1 |   2 |
++----+-----+
+(1 row)
+
+!ok
+
+# [CALCITE-7207] Semi Join RelNode cannot be translated into correct MySQL SQL
+# This SQL comes from RelToSqlConverterTest.testSemiJoinMysqlNoExtraAlias()
+!use scott-mysql
+SELECT "t"."EMPNO", "EMP0"."EMPNO" AS "EMPNO0"
+FROM (SELECT "EMPNO"
+FROM "scott"."EMP") AS "t"
+INNER JOIN "scott"."EMP" AS "EMP0" ON "t"."EMPNO" = "EMP0"."EMPNO"
+WHERE EXISTS (SELECT 1
+FROM (SELECT "t1"."EMPNO", "EMP2"."EMPNO" AS "EMPNO0"
+FROM (SELECT "EMPNO"
+FROM "scott"."EMP") AS "t1"
+INNER JOIN "scott"."EMP" AS "EMP2" ON "t1"."EMPNO" = "EMP2"."EMPNO") AS "t2"
+WHERE "t"."EMPNO" = "t2"."EMPNO" AND "t"."EMPNO" > "t2"."EMPNO");
++-------+--------+
+| EMPNO | EMPNO0 |
++-------+--------+
++-------+--------+
+(0 rows)
+
+!ok
+
+# [CALCITE-3128] Joining two tables producing only NULLs will return 0 rows
+SELECT * FROM (SELECT NULLIF(5, 5)) a , (SELECT NULLIF(5, 5)) b;
++--------+---------+
+| EXPR$0 | EXPR$00 |
++--------+---------+
+|        |         |
++--------+---------+
+(1 row)
+
+!ok
+
+SELECT * FROM (VALUES (NULLIF(5, 5)), (NULLIF(5, 5))) a, (VALUES (NULLIF(5, 5)), (NULLIF(5, 5))) b;
++---+---+
+| A | B |
++---+---+
+|   |   |
+|   |   |
+|   |   |
+|   |   |
++---+---+
+(4 rows)
+
+!ok
+
+# [CALCITE-7345] Quidem test support for Field Trimmer
+!use scott
+!set trimfields false
+
+select distinct dept.deptno, emp.deptno
+from "scott".emp join "scott".dept using (deptno);
+
+EnumerableAggregate(group=[{0, 10}])
+  EnumerableHashJoin(condition=[=($0, $10)], joinType=[inner])
+    EnumerableTableScan(table=[[scott, DEPT]])
+    EnumerableTableScan(table=[[scott, EMP]])
+!plan
+
+!set trimfields true
+
+select distinct dept.deptno, emp.deptno
+from "scott".emp join "scott".dept using (deptno);
+
+EnumerableAggregate(group=[{0, 2}])
+  EnumerableHashJoin(condition=[=($0, $2)], joinType=[inner])
+    EnumerableCalc(expr#0..2=[{inputs}], DEPTNO=[$t0])
+      EnumerableTableScan(table=[[scott, DEPT]])
+    EnumerableCalc(expr#0..7=[{inputs}], EMPNO=[$t0], DEPTNO=[$t7])
+      EnumerableTableScan(table=[[scott, EMP]])
+!plan
+
 # End join.iq

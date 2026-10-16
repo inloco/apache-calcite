@@ -35,6 +35,7 @@ import org.apache.calcite.linq4j.function.Functions;
 import org.apache.calcite.linq4j.function.NonDeterministic;
 import org.apache.calcite.linq4j.function.Predicate1;
 import org.apache.calcite.linq4j.tree.Primitive;
+import org.apache.calcite.linq4j.tree.UnsignedType;
 import org.apache.calcite.rel.type.TimeFrame;
 import org.apache.calcite.rel.type.TimeFrameSet;
 import org.apache.calcite.runtime.FlatLists.ComparableList;
@@ -59,8 +60,8 @@ import org.apache.commons.codec.binary.Base32;
 import org.apache.commons.codec.binary.Hex;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.apache.commons.codec.language.Soundex;
-import org.apache.commons.lang.StringEscapeUtils;
 import org.apache.commons.math3.util.CombinatoricsUtils;
+import org.apache.commons.text.StringEscapeUtils;
 import org.apache.commons.text.similarity.LevenshteinDistance;
 
 import com.google.common.base.Splitter;
@@ -73,6 +74,11 @@ import com.google.common.util.concurrent.UncheckedExecutionException;
 
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.checkerframework.checker.nullness.qual.PolyNull;
+import org.joou.UByte;
+import org.joou.UInteger;
+import org.joou.ULong;
+import org.joou.UShort;
+import org.joou.Unsigned;
 
 import java.lang.reflect.Field;
 import java.math.BigDecimal;
@@ -82,6 +88,7 @@ import java.math.RoundingMode;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.nio.charset.CharacterCodingException;
 import java.nio.charset.Charset;
 import java.nio.charset.CharsetDecoder;
@@ -93,11 +100,13 @@ import java.text.DecimalFormat;
 import java.text.Normalizer;
 import java.text.ParsePosition;
 import java.text.SimpleDateFormat;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.OffsetDateTime;
+import java.time.Period;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
@@ -222,6 +231,11 @@ public class SqlFunctions {
    * will want persistent values for sequences, shared among threads. */
   private static final TryThreadLocal<Map<String, AtomicLong>> THREAD_SEQUENCES =
       TryThreadLocal.withInitial(HashMap::new);
+
+  /** Resets the sequences in the current thread. */
+  public static void resetThreadSequences() {
+    THREAD_SEQUENCES.get().clear();
+  }
 
   /** A byte string consisting of a single byte that is the ASCII space
    * character (0x20). */
@@ -990,11 +1004,18 @@ public class SqlFunctions {
 
   /** SQL {@code SPLIT_PART(string, string, int)} function. */
   public static String splitPart(String s, String delimiter, int n) {
-    if (Strings.isNullOrEmpty(s) || Strings.isNullOrEmpty(delimiter)) {
+    // Function is strict, so arguments cannot be null
+    if (s.isEmpty()) {
       return "";
     }
 
-    String[] parts = s.split(delimiter, -1);
+
+    String[] parts;
+    if (delimiter.isEmpty()) {
+      parts = new String[] { s };
+    } else {
+      parts = s.split(Pattern.quote(delimiter), -1);
+    }
     int partCount = parts.length;
 
     if (n < 0) {
@@ -1007,8 +1028,6 @@ public class SqlFunctions {
 
     return parts[n - 1];
   }
-
-
 
   /** SQL {@code SPLIT(string)} function. */
   public static List<String> split(String s) {
@@ -1256,6 +1275,66 @@ public class SqlFunctions {
   public static String formatNumber(BigDecimal value, int decimalVal) {
     DecimalFormat numberFormat = getNumberFormat(decimalVal);
     return numberFormat.format(value);
+  }
+
+  /** Implements casts from integer to binary values.
+   *
+   * @param value      Value converted; an integer or unsigned value.
+   * @param resultSize Size of result in bytes; negative if unspecified.
+   * @param fixed      True if the result type is BINARY; false for VARBINARY.
+   * @return           A ByteString containing the conversion result.
+   *
+   * <p>Most SQL dialects which support this feature seem to convert integers to big endian values,
+   * and then truncate or pad on the left when the size of the target BINARY does not exactly
+   * match the integer's size.
+   */
+  public static ByteString intToBinary(Object value, int resultSize, boolean fixed) {
+    ByteBuffer buffer;
+    if (value instanceof Byte) {
+      buffer = ByteBuffer.allocate(1)
+          .order(ByteOrder.BIG_ENDIAN)
+          .put((byte) value);
+    } else if (value instanceof Short) {
+      buffer = ByteBuffer.allocate(2)
+          .order(ByteOrder.BIG_ENDIAN)
+          .putShort((short) value);
+    } else if (value instanceof Integer) {
+      buffer = ByteBuffer.allocate(4)
+          .order(ByteOrder.BIG_ENDIAN)
+          .putInt((Integer) value);
+    } else if (value instanceof Long) {
+      buffer = ByteBuffer.allocate(8)
+          .order(ByteOrder.BIG_ENDIAN)
+          .putLong((Long) value);
+    } else if (value instanceof UByte) {
+      buffer = ByteBuffer.allocate(1)
+          .order(ByteOrder.BIG_ENDIAN)
+          .put(((UByte) value).byteValue());
+    } else if (value instanceof UShort) {
+      buffer = ByteBuffer.allocate(2)
+          .order(ByteOrder.BIG_ENDIAN)
+          .putShort(((UShort) value).shortValue());
+    } else if (value instanceof UInteger) {
+      buffer = ByteBuffer.allocate(4)
+          .order(ByteOrder.BIG_ENDIAN)
+          .putInt(((UInteger) value).intValue());
+    } else if (value instanceof ULong) {
+      buffer = ByteBuffer.allocate(8)
+          .order(ByteOrder.BIG_ENDIAN)
+          .putLong(((ULong) value).longValue());
+    } else {
+      throw new IllegalArgumentException("Unexpected argument type " + value);
+    }
+    ByteString result = new ByteString(buffer.array());
+    if (resultSize >= 0) {
+      if (resultSize < result.length()) {
+        result = SqlFunctions.right(result, resultSize);
+      } else if (fixed && resultSize > result.length()) {
+        // pad on left
+        result = new ByteString(new byte[resultSize - result.length()]).concat(result);
+      }
+    }
+    return result;
   }
 
   public static String formatNumber(long value, String format) {
@@ -2107,13 +2186,23 @@ public class SqlFunctions {
   /** SQL <code>=</code> operator applied to Object[] values (neither may be
    * null). */
   public static boolean eq(@Nullable Object @Nullable [] b0, @Nullable Object @Nullable [] b1) {
-    return Arrays.deepEquals(b0, b1);
+    return Functions.compareObjectArrays(b0, b1) == 0;
   }
 
   /** SQL <code>=</code> operator applied to Object values (including String;
    * neither side may be null). */
   public static boolean eq(Object b0, Object b1) {
     return b0.equals(b1);
+  }
+
+  /** SQL <code>=</code> operator applied to List values. */
+  public static boolean eq(List<?> b0, List<?> b1) {
+    return eqNullable(b0, b1);
+  }
+
+  /** SQL <code>=</code> operator applied to Map values. */
+  public static boolean eq(Map<?, ?> b0, Map<?, ?> b1) {
+    return eqNullable(b0, b1);
   }
 
   /** SQL <code>=</code> operator applied to String values with a certain Comparator. */
@@ -2124,22 +2213,7 @@ public class SqlFunctions {
   /** SQL <code>=</code> operator applied to Object values (at least one operand
    * has ANY type; neither may be null). */
   public static boolean eqAny(Object b0, Object b1) {
-    if (b0.getClass().equals(b1.getClass())) {
-      // The result of SqlFunctions.eq(BigDecimal, BigDecimal) makes more sense
-      // than BigDecimal.equals(BigDecimal). So if both of types are BigDecimal,
-      // we just use SqlFunctions.eq(BigDecimal, BigDecimal).
-      if (BigDecimal.class.isInstance(b0)) {
-        return eq((BigDecimal) b0, (BigDecimal) b1);
-      } else {
-        return b0.equals(b1);
-      }
-    } else if (allAssignable(Number.class, b0, b1)) {
-      return eq(toBigDecimal((Number) b0), toBigDecimal((Number) b1));
-    }
-    // We shouldn't rely on implementation even though overridden equals can
-    // handle other types which may create worse result: for example,
-    // a.equals(b) != b.equals(a)
-    return false;
+    return eqNullable(b0, b1);
   }
 
   /** Returns whether two objects can both be assigned to a given class. */
@@ -2160,6 +2234,21 @@ public class SqlFunctions {
     return !eq(b0, b1);
   }
 
+  /** SQL <code>&lt;gt;</code> operator applied to List values. */
+  public static boolean ne(List<?> b0, List<?> b1) {
+    return !eqNullable(b0, b1);
+  }
+
+  /** SQL <code>&lt;gt;</code> operator applied to Map values. */
+  public static boolean ne(Map<?, ?> b0, Map<?, ?> b1) {
+    return !eqNullable(b0, b1);
+  }
+
+  /** SQL <code>&lt;gt;</code> operator applied to Object[] values. */
+  public static boolean ne(@Nullable Object @Nullable [] b0, @Nullable Object @Nullable [] b1) {
+    return !eqNullable(b0, b1);
+  }
+
   /** SQL <code>&lt;gt;</code> operator applied to OString values with a certain Comparator. */
   public static boolean ne(String s0, String s1, Comparator<String> comparator) {
     return !eq(s0, s1, comparator);
@@ -2169,6 +2258,66 @@ public class SqlFunctions {
    * operand has ANY type, including String; neither may be null). */
   public static boolean neAny(Object b0, Object b1) {
     return !eqAny(b0, b1);
+  }
+
+  private static boolean eqNullable(@Nullable Object b0, @Nullable Object b1) {
+    if (b0 == b1) {
+      return true;
+    }
+    if (b0 == null || b1 == null) {
+      return false;
+    }
+    if (b0 instanceof List && b1 instanceof List) {
+      return Functions.compareLists((List<?>) b0, (List<?>) b1) == 0;
+    }
+    if (b0 instanceof Map && b1 instanceof Map) {
+      return Functions.compareMaps((Map<?, ?>) b0, (Map<?, ?>) b1) == 0;
+    }
+    if (b0 instanceof Object[] && b1 instanceof Object[]) {
+      return Functions.compareObjectArrays((Object[]) b0, (Object[]) b1) == 0;
+    }
+    if (b0.getClass().equals(b1.getClass())) {
+      if (b0 instanceof BigDecimal) {
+        return eq((BigDecimal) b0, (BigDecimal) b1);
+      }
+      return b0.equals(b1);
+    }
+    if (b0 instanceof Number && b1 instanceof Number) {
+      return eq(toBigDecimal((Number) b0), toBigDecimal((Number) b1));
+    }
+    return false;
+  }
+
+  /** Compares two nullable objects recursively if they are collections.
+   * Nulls are treated as larger than non-null values. The op is used to record
+   * the type of comparison operation for user-friendly display in error messages. */
+  private static int compareNullable(@Nullable Object b0, @Nullable Object b1, String op) {
+    if (b0 == b1) {
+      return 0;
+    }
+    if (b0 == null) {
+      return 1;
+    }
+    if (b1 == null) {
+      return -1;
+    }
+    if (b0 instanceof List && b1 instanceof List) {
+      return Functions.compareLists((List<?>) b0, (List<?>) b1);
+    }
+    if (b0 instanceof Map && b1 instanceof Map) {
+      return Functions.compareMaps((Map<?, ?>) b0, (Map<?, ?>) b1);
+    }
+    if (b0 instanceof Object[] && b1 instanceof Object[]) {
+      return Functions.compareObjectArrays((Object[]) b0, (Object[]) b1);
+    }
+    if (b0.getClass().equals(b1.getClass()) && b0 instanceof Comparable) {
+      //noinspection unchecked
+      return ((Comparable) b0).compareTo(b1);
+    }
+    if (b0 instanceof Number && b1 instanceof Number) {
+      return toBigDecimal((Number) b0).compareTo(toBigDecimal((Number) b1));
+    }
+    throw notComparable(op, b0, b1);
   }
 
   // <
@@ -2233,24 +2382,20 @@ public class SqlFunctions {
   }
 
   public static boolean lt(List<?> b0, List<?> b1) {
-    return Functions.compareLists(b0, b1) < 0;
+    return compareNullable(b0, b1, "<") < 0;
   }
 
-  public static boolean lt(Object[] b0, Object[] b1) {
-    return Functions.compareObjectArrays(b0, b1) < 0;
+  public static boolean lt(Map<?, ?> b0, Map<?, ?> b1) {
+    return compareNullable(b0, b1, "<") < 0;
+  }
+
+  public static boolean lt(@Nullable Object @Nullable [] b0, @Nullable Object @Nullable [] b1) {
+    return compareNullable(b0, b1, "<") < 0;
   }
 
   /** SQL <code>&lt;</code> operator applied to Object values. */
   public static boolean ltAny(Object b0, Object b1) {
-    if (b0.getClass().equals(b1.getClass())
-        && b0 instanceof Comparable) {
-      //noinspection unchecked
-      return ((Comparable) b0).compareTo(b1) < 0;
-    } else if (allAssignable(Number.class, b0, b1)) {
-      return lt(toBigDecimal((Number) b0), toBigDecimal((Number) b1));
-    }
-
-    throw notComparable("<", b0, b1);
+    return compareNullable(b0, b1, "<") < 0;
   }
 
   // <=
@@ -2282,26 +2427,23 @@ public class SqlFunctions {
 
   /** SQL <code>&le;</code> operator applied to List values. */
   public static boolean le(List<?> b0, List<?> b1) {
-    return Functions.compareLists(b0, b1) <= 0;
+    return compareNullable(b0, b1, "<=") <= 0;
+  }
+
+  /** SQL <code>&le;</code> operator applied to Map values. */
+  public static boolean le(Map<?, ?> b0, Map<?, ?> b1) {
+    return compareNullable(b0, b1, "<=") <= 0;
   }
 
   /** SQL <code>&le;</code> operator applied to Object[] values. */
-  public static boolean le(Object[] b0, Object[] b1) {
-    return Functions.compareObjectArrays(b0, b1) <= 0;
+  public static boolean le(@Nullable Object @Nullable [] b0, @Nullable Object @Nullable [] b1) {
+    return compareNullable(b0, b1, "<=") <= 0;
   }
 
   /** SQL <code>&le;</code> operator applied to Object values (at least one
    * operand has ANY type; neither may be null). */
   public static boolean leAny(Object b0, Object b1) {
-    if (b0.getClass().equals(b1.getClass())
-        && b0 instanceof Comparable) {
-      //noinspection unchecked
-      return ((Comparable) b0).compareTo(b1) <= 0;
-    } else if (allAssignable(Number.class, b0, b1)) {
-      return le(toBigDecimal((Number) b0), toBigDecimal((Number) b1));
-    }
-
-    throw notComparable("<=", b0, b1);
+    return compareNullable(b0, b1, "<=") <= 0;
   }
 
   // >
@@ -2366,25 +2508,21 @@ public class SqlFunctions {
   }
 
   public static boolean gt(List<?> b0, List<?> b1) {
-    return Functions.compareLists(b0, b1) > 0;
+    return compareNullable(b0, b1, ">") > 0;
   }
 
-  public static boolean gt(Object[] b0, Object[] b1) {
-    return Functions.compareObjectArrays(b0, b1) > 0;
+  public static boolean gt(Map<?, ?> b0, Map<?, ?> b1) {
+    return compareNullable(b0, b1, ">") > 0;
+  }
+
+  public static boolean gt(@Nullable Object @Nullable [] b0, @Nullable Object @Nullable [] b1) {
+    return compareNullable(b0, b1, ">") > 0;
   }
 
   /** SQL <code>&gt;</code> operator applied to Object values (at least one
    * operand has ANY type; neither may be null). */
   public static boolean gtAny(Object b0, Object b1) {
-    if (b0.getClass().equals(b1.getClass())
-        && b0 instanceof Comparable) {
-      //noinspection unchecked
-      return ((Comparable) b0).compareTo(b1) > 0;
-    } else if (allAssignable(Number.class, b0, b1)) {
-      return gt(toBigDecimal((Number) b0), toBigDecimal((Number) b1));
-    }
-
-    throw notComparable(">", b0, b1);
+    return compareNullable(b0, b1, ">") > 0;
   }
 
   // >=
@@ -2416,26 +2554,23 @@ public class SqlFunctions {
 
   /** SQL <code>&ge;</code> operator applied to List values. */
   public static boolean ge(List<?> b0, List<?> b1) {
-    return Functions.compareLists(b0, b1) >= 0;
+    return compareNullable(b0, b1, ">=") >= 0;
+  }
+
+  /** SQL <code>&ge;</code> operator applied to Map values. */
+  public static boolean ge(Map<?, ?> b0, Map<?, ?> b1) {
+    return compareNullable(b0, b1, ">=") >= 0;
   }
 
   /** SQL <code>&ge;</code> operator applied to Object[] values. */
-  public static boolean ge(Object[] b0, Object[] b1) {
-    return Functions.compareObjectArrays(b0, b1) >= 0;
+  public static boolean ge(@Nullable Object @Nullable [] b0, @Nullable Object @Nullable [] b1) {
+    return compareNullable(b0, b1, ">=") >= 0;
   }
 
   /** SQL <code>&ge;</code> operator applied to Object values (at least one
    * operand has ANY type; neither may be null). */
   public static boolean geAny(Object b0, Object b1) {
-    if (b0.getClass().equals(b1.getClass())
-        && b0 instanceof Comparable) {
-      //noinspection unchecked
-      return ((Comparable) b0).compareTo(b1) >= 0;
-    } else if (allAssignable(Number.class, b0, b1)) {
-      return ge(toBigDecimal((Number) b0), toBigDecimal((Number) b1));
-    }
-
-    throw notComparable(">=", b0, b1);
+    return compareNullable(b0, b1, ">=") >= 0;
   }
 
   // +
@@ -2497,6 +2632,30 @@ public class SqlFunctions {
     throw notArithmetic("+", b0, b1);
   }
 
+  public static @PolyNull UByte plus(@PolyNull UByte b0, @PolyNull UByte b1) {
+    return (b0 == null || b1 == null)
+        ? castNonNull(null)
+        : b0.add(b1);
+  }
+
+  public static @PolyNull UShort plus(@PolyNull UShort b0, @PolyNull UShort b1) {
+    return (b0 == null || b1 == null)
+        ? castNonNull(null)
+        : b0.add(b1);
+  }
+
+  public static @PolyNull UInteger plus(@PolyNull UInteger b0, @PolyNull UInteger b1) {
+    return (b0 == null || b1 == null)
+        ? castNonNull(null)
+        : b0.add(b1);
+  }
+
+  public static @PolyNull ULong plus(@PolyNull ULong b0, @PolyNull ULong b1) {
+    return (b0 == null || b1 == null)
+        ? castNonNull(null)
+        : b0.add(b1);
+  }
+
   // checked +
 
   static byte intToByte(int value) {
@@ -2529,6 +2688,22 @@ public class SqlFunctions {
 
   public static long checkedPlus(long b0, long b1) {
     return Math.addExact(b0, b1);
+  }
+
+  public static UByte checkedPlus(UByte b0, UByte b1) {
+    return b0.add(b1);
+  }
+
+  public static UShort checkedPlus(UShort b0, UShort b1) {
+    return b0.add(b1);
+  }
+
+  public static UInteger checkedPlus(UInteger b0, UInteger b1) {
+    return b0.add(b1);
+  }
+
+  public static ULong checkedPlus(ULong b0, ULong b1) {
+    return b0.add(b1);
   }
 
   // -
@@ -2569,6 +2744,13 @@ public class SqlFunctions {
         : (b0.longValue() - b1.longValue());
   }
 
+  /** SQL <code>-</code> operator applied to nullable long and long values. */
+  public static @PolyNull Long minus(@PolyNull Long b0, @PolyNull Long b1) {
+    return (b0 == null || b1 == null)
+        ? castNonNull(null)
+        : b0.longValue() - b1.longValue();
+  }
+
   /** SQL <code>-</code> operator applied to nullable BigDecimal values. */
   public static @PolyNull BigDecimal minus(@PolyNull BigDecimal b0,
       @PolyNull BigDecimal b1) {
@@ -2587,6 +2769,25 @@ public class SqlFunctions {
     }
 
     throw notArithmetic("-", b0, b1);
+  }
+
+  public static @PolyNull UByte minus(@PolyNull UByte b0, @PolyNull UByte b1) {
+    return (b0 == null || b1 == null) ? castNonNull(null) : b0.subtract(b1);
+  }
+
+  public static @PolyNull UShort minus(@PolyNull UShort b0, @PolyNull UShort b1) {
+    return (b0 == null || b1 == null) ? castNonNull(null) : b0.subtract(b1);
+  }
+
+  public static @PolyNull UInteger minus(@PolyNull UInteger b0, @PolyNull UInteger b1) {
+    return (b0 == null || b1 == null) ? castNonNull(null) : b0.subtract(b1);
+  }
+
+  /** SQL <code>-</code> operator applied to nullable unsigned long and long values. */
+  public static @PolyNull ULong minus(@PolyNull ULong b0, @PolyNull ULong b1) {
+    return (b0 == null || b1 == null)
+        ? castNonNull(null)
+        : b0.subtract(b1);
   }
 
   // checked -
@@ -2621,6 +2822,38 @@ public class SqlFunctions {
 
   public static long checkedUnaryMinus(long b) {
     return Math.subtractExact(0, b);
+  }
+
+  public static UByte checkedMinus(UByte b0, UByte b1) {
+    return b0.subtract(b1);
+  }
+
+  public static UShort checkedMinus(UShort b0, UShort b1) {
+    return b0.subtract(b1);
+  }
+
+  public static UInteger checkedMinus(UInteger b0, UInteger b1) {
+    return b0.subtract(b1);
+  }
+
+  public static ULong checkedMinus(ULong b0, ULong b1) {
+    return b0.subtract(b1);
+  }
+
+  public static UByte checkedUnaryMinus(UByte b) {
+    return Unsigned.ubyte(0).subtract(b);
+  }
+
+  public static UShort checkedUnaryMinus(UShort b) {
+    return Unsigned.ushort(0).subtract(b);
+  }
+
+  public static UInteger checkedUnaryMinus(UInteger b) {
+    return Unsigned.uint(0).subtract(b);
+  }
+
+  public static ULong checkedUnaryMinus(ULong b) {
+    return Unsigned.ulong(0).subtract(b);
   }
 
   // /
@@ -2695,6 +2928,30 @@ public class SqlFunctions {
         .divide(b1, RoundingMode.HALF_DOWN).longValue();
   }
 
+  public static @PolyNull UByte divide(@PolyNull UByte b0,
+      @PolyNull UByte b1) {
+    return (b0 == null || b1 == null) ? castNonNull(null)
+        : UByte.valueOf(b0.intValue() / b1.intValue());
+  }
+
+  public static @PolyNull UShort divide(@PolyNull UShort b0,
+      @PolyNull UShort b1) {
+    return (b0 == null || b1 == null) ? castNonNull(null)
+        : UShort.valueOf(b0.intValue() / b1.intValue());
+  }
+
+  public static @PolyNull UInteger divide(@PolyNull UInteger b0,
+      @PolyNull UInteger b1) {
+    return (b0 == null || b1 == null) ? castNonNull(null)
+        : UInteger.valueOf(b0.longValue() / b1.longValue());
+  }
+
+  public static @PolyNull ULong divide(@PolyNull ULong b0,
+      @PolyNull ULong b1) {
+    return (b0 == null || b1 == null) ? castNonNull(null)
+        : ULong.valueOf(UnsignedType.toBigInteger(b0).divide(UnsignedType.toBigInteger(b1)));
+  }
+
   public static byte checkedDivide(byte b0, byte b1) {
     return intToByte(b0 / b1);
   }
@@ -2719,8 +2976,38 @@ public class SqlFunctions {
     if ((b0 & b1 & q) >= 0) {
       return q;
     } else {
-      throw new ArithmeticException("integer overflow");
+      throw new ArithmeticException("long overflow");
     }
+  }
+
+  public static double checkedDivide(int b0, double b1) {
+    return b0 / b1;
+  }
+
+  public static UByte checkedDivide(UByte b0, UByte b1) {
+    return UByte.valueOf(b0.intValue() / b1.intValue());
+  }
+
+  public static UShort checkedDivide(UShort b0, UShort b1) {
+    return UShort.valueOf(b0.intValue() / b1.intValue());
+  }
+
+  public static UInteger checkedDivide(UInteger b0, UInteger b1) {
+    return UInteger.valueOf(b0.longValue() / b1.longValue());
+  }
+
+  public static ULong checkedDivide(ULong b0, ULong b1) {
+    return ULong.valueOf(UnsignedType.toBigInteger(b0).divide(UnsignedType.toBigInteger(b1)));
+  }
+
+  // The definition of this function must match the divide function with the same signature
+  public static int checkedDivide(int b0, BigDecimal b1) {
+    return BigDecimal.valueOf(b0)
+        .divide(b1, RoundingMode.HALF_DOWN).intValueExact();
+  }
+
+  public static BigDecimal checkedDivide(BigDecimal b0, BigDecimal b1) {
+    return b0.divide(b1, RoundingMode.HALF_DOWN);
   }
 
   // *
@@ -2746,6 +3033,33 @@ public class SqlFunctions {
   public static @PolyNull Integer multiply(@PolyNull Integer b0,
       @PolyNull Integer b1) {
     return (b0 == null || b1 == null) ? castNonNull(null) : (b0 * b1);
+  }
+
+  public static @PolyNull UByte multiply(@PolyNull UByte b0,
+      @PolyNull UByte b1) {
+    return (b0 == null || b1 == null) ? castNonNull(null)
+        : UByte.valueOf(b0.longValue() * b1.longValue());
+  }
+
+  public static @PolyNull UShort multiply(@PolyNull UShort b0,
+      @PolyNull UShort b1) {
+    return (b0 == null || b1 == null) ? castNonNull(null)
+        : UShort.valueOf(b0.intValue() * b1.intValue());
+  }
+
+  public static @PolyNull UInteger multiply(@PolyNull UInteger b0,
+      @PolyNull UInteger b1) {
+    return (b0 == null || b1 == null) ? castNonNull(null)
+        : UInteger.valueOf(b0.longValue() * b1.longValue());
+  }
+
+  public static @PolyNull ULong multiply(@PolyNull ULong b0,
+      @PolyNull ULong b1) {
+    if (b0 == null || b1 == null) {
+      return castNonNull(null);
+    }
+    BigInteger result = UnsignedType.toBigInteger(b0).multiply(UnsignedType.toBigInteger(b1));
+    return ULong.valueOf(result);
   }
 
   /** SQL <code>*</code> operator applied to nullable long and int values. */
@@ -2799,6 +3113,27 @@ public class SqlFunctions {
 
   public static long checkedMultiply(long b0, long b1) {
     return Math.multiplyExact(b0, b1);
+  }
+
+  public static UByte checkedMultiply(UByte b0, UByte b1) {
+    return UByte.valueOf(b0.intValue() * b1.intValue());
+  }
+
+  public static UShort checkedMultiply(UShort b0, UShort b1) {
+    return UShort.valueOf(b0.intValue() * b1.intValue());
+  }
+
+  public static UInteger checkedMultiply(UInteger b0, UInteger b1) {
+    return
+        UInteger.valueOf(b0.longValue() * b1.longValue());
+  }
+
+  public static ULong checkedMultiply(ULong b0, ULong b1) {
+    return ULong.valueOf(UnsignedType.toBigInteger(b0).multiply(UnsignedType.toBigInteger(b1)));
+  }
+
+  public static BigDecimal checkedMultiply(BigDecimal b0, long b1) {
+    return b0.multiply(BigDecimal.valueOf(b1));
   }
 
   /** SQL <code>SAFE_ADD</code> function applied to long values. */
@@ -3089,6 +3424,125 @@ public class SqlFunctions {
     return binaryOperator(b0, b1, (x, y) -> (byte) (x & y));
   }
 
+  /**
+   * Bitwise function <code>BITAND</code> applied to {@link org.joou.UByte} values.
+   * Returns {@code null} if any operand is null.
+   */
+  public static UByte bitAnd(UByte b0, UByte b1) {
+    return UByte.valueOf((short) (b0.shortValue() & b1.shortValue()));
+  }
+
+  /**
+   * Bitwise function <code>BITAND</code> applied to {@link org.joou.UShort} values.
+   * Returns {@code null} if any operand is null.
+   */
+  public static UShort bitAnd(UShort b0, UShort b1) {
+    return UShort.valueOf(b0.intValue() & b1.intValue());
+  }
+
+  /**
+   * Bitwise function <code>BITAND</code> applied to {@link org.joou.UInteger} values.
+   * Returns {@code null} if any operand is null.
+   */
+  public static UInteger bitAnd(UInteger b0, UInteger b1) {
+    return UInteger.valueOf(b0.longValue() & b1.longValue());
+  }
+
+  /**
+   * Bitwise function <code>BITAND</code> applied to {@link org.joou.ULong} values. Returns
+   * {@code null} if any operand is null.
+   */
+  public static ULong bitAnd(ULong b0, ULong b1) {
+    return ULong.valueOf(b0.longValue() & b1.longValue());
+  }
+
+  /**
+   * Bitwise function <code>BITAND</code> applied to {@link org.joou.UInteger} and {@link Integer}
+   * values. Returns {@code null} if any operand is null.
+   */
+  public static long bitAnd(UInteger b0, long b1) {
+    return b0.intValue() & b1;
+  }
+
+  /**
+   * Bitwise function <code>BITAND</code> applied to {@link org.joou.ULong} and {@link long}
+   * values. Returns {@code null} if any operand is null.
+   */
+  public static long bitAnd(ULong b0, long b1) {
+    return b0.longValue() & b1;
+  }
+
+  /**
+   * Bitwise function <code>BITAND</code> applied to {@link long} and {@link org.joou.UInteger}
+   * values. Returns {@code null} if any operand is null.
+   */
+  public static long bitAnd(long b1, ULong b2) {
+    return b1 & b2.longValue();
+  }
+
+  /**
+   * Bitwise function <code>BITAND</code> applied to {@link long} and {@link org.joou.UInteger}
+   * values. Returns {@code null} if any operand is null.
+   */
+  public static long bitAnd(long b1, UInteger b2) {
+    return b1 & b2.longValue();
+  }
+
+  /**
+   * Bitwise function <code>BITAND</code> applied to {@link org.joou.UShort} and {@link Integer}
+   * values. Returns {@code null} if any operand is null.
+   */
+  public static long bitAnd(UShort b0, long b1) {
+    return b0.intValue() & b1;
+  }
+
+  /**
+   * Bitwise function <code>BITAND</code> applied to {@link org.joou.UShort} and {@link Integer}
+   * values. Returns {@code null} if any operand is null.
+   */
+  public static long bitAnd(long b0, UShort b1) {
+    return b0 & b1.intValue();
+  }
+
+  /**
+   * Bitwise function <code>BITAND</code> applied to {@link org.joou.UInteger} and {@link Integer}
+   * values. Returns {@code null} if any operand is null.
+   */
+  public static UInteger bitAnd(UInteger b0, int b1) {
+    return UInteger.valueOf(b0.intValue() & b1);
+  }
+
+  /**
+   * Bitwise function <code>BITAND</code> applied to {@link org.joou.UInteger} and {@link Integer}
+   * values. Returns {@code null} if any operand is null.
+   */
+  public static ULong bitAnd(ULong b0, int b1) {
+    return ULong.valueOf(b0.longValue() & b1);
+  }
+
+  /**
+   * Bitwise function <code>BITAND</code> applied to {@link Integer} and {@link org.joou.UInteger}
+   * values. Returns {@code null} if any operand is null.
+   */
+  public static ULong bitAnd(int b1, ULong b2) {
+    return ULong.valueOf(b1 & b2.longValue());
+  }
+
+  /**
+   * Bitwise function <code>BITAND</code> applied to {@link org.joou.UShort} and {@link Integer}
+   * values. Returns {@code null} if any operand is null.
+   */
+  public static Integer bitAnd(int b0, UShort b1) {
+    return b0 & b1.intValue();
+  }
+
+  /**
+   * Bitwise function <code>BITAND</code> applied to {@link org.joou.UShort} and {@link Integer}
+   * values. Returns {@code null} if any operand is null.
+   */
+  public static Integer bitAnd(UShort b0, int b1) {
+    return b0.intValue() & b1;
+  }
   /** Helper function for implementing <code>BITCOUNT</code>. Counts the number
    * of bits set in an integer value. */
   public static long bitCount(long b) {
@@ -3195,15 +3649,17 @@ public class SqlFunctions {
     return b0 ^ b1;
   }
 
-  /** Bitwise function <code>BITXOR</code> applied to a Long and int value.
-   *  Needed for handling NULL for the first argument.
+  /**
+   * Bitwise function <code>BITXOR</code> applied to a Long and int value. Overload to support type
+   * coercion between boxed Long and primitive int.
    */
   public static long bitXor(Long b0, int b1) {
     return b0 ^ b1;
   }
 
-  /** Bitwise function <code>BITXOR</code> applied to a Long and int value.
-   *  Needed for handling NULL for the second argument.
+  /**
+   * Bitwise function <code>BITXOR</code> applied to a Long and int value. Overload to support type
+   * coercion between boxed Long and primitive int.
    */
   public static long bitXor(int b0, Long b1) {
     return b0 ^ b1;
@@ -3227,6 +3683,63 @@ public class SqlFunctions {
     }
 
     return new ByteString(result);
+  }
+
+  /**
+   * Bitwise function <code>BITXOR</code> applied to {@link Long} values.
+   * Returns {@code null} if any operand is null.
+   */
+  public static long bitXor(Long b0, Long b1) {
+    return b0 ^ b1;
+  }
+
+  /**
+   * Bitwise function <code>BITXOR</code> applied to {@link Integer} values.
+   * Returns {@code null} if any operand is null.
+   */
+  public static long bitXor(Integer b0, Integer b1) {
+    return b0 ^ b1;
+  }
+
+  /**
+   * Bitwise function <code>BITXOR</code> applied to {@link org.joou.UByte} values.
+   * Returns {@code null} if any operand is null.
+   */
+  public static UByte bitXor(UByte b0, UByte b1) {
+    return  UByte.valueOf(b0.shortValue() ^ b1.shortValue());
+  }
+
+  /**
+   * Bitwise function <code>BITXOR</code> applied to {@link org.joou.UShort} values.
+   * Returns {@code null} if any operand is null.
+   */
+  public static UShort bitXor(UShort b0, UShort b1) {
+    return  UShort.valueOf(b0.intValue() ^ b1.intValue());
+  }
+
+  /**
+   * Bitwise function <code>BITXOR</code> applied to {@link org.joou.UInteger} values.
+   * Returns {@code null} if any operand is null.
+   */
+  public static UInteger bitXor(UInteger b0, UInteger b1) {
+    return UInteger.valueOf(b0.longValue() ^ b1.longValue());
+  }
+
+  /**
+   * Bitwise function <code>BITXOR</code> applied to {@link org.joou.ULong} values.
+   * Returns {@code null} if any operand is null.
+   */
+  public static ULong bitXor(ULong b0, ULong b1) {
+    return ULong.valueOf(b0.longValue() ^ b1.longValue());
+  }
+
+  public static @Nullable Object bitXor(@Nullable Object b0, @Nullable Object b1) {
+    if (b0 == null || b1 == null) {
+      return null;
+    }
+    throw new IllegalArgumentException(
+        "Invalid arguments for BITXOR: "
+            + "" + b0.getClass() + ", " + b1.getClass());
   }
 
   /**
@@ -3257,6 +3770,148 @@ public class SqlFunctions {
     }
 
     return new ByteString(result);
+  }
+
+  /**
+   * Performs PostgresSQL-style bitwise shift on a 32-bit integer.
+   *
+   * @param x the integer value to shift
+   * @param y the shift amount (positive: left shift, negative: right shift)
+   * @return the shifted integer
+   */
+  public static int leftShift(int x, int y) {
+    int shift = ((y % 32) + 32) % 32; // normalize to 0~31
+    return y >= 0 ? x << shift : x >> shift; // arithmetic right shift
+  }
+
+
+  // ----------------- long -----------------
+  /**
+   * Performs PostgresSQL-style bitwise shift on a 64-bit long value.
+   *
+   * @param x the long value to shift
+   * @param y the shift amount
+   * @return the shifted long value
+   */
+  public static long leftShift(long x, int y) {
+    int shift = ((y % 64) + 64) % 64; // normalize to 0~63
+    return y >= 0 ? x << shift : x >> shift;
+  }
+
+  /**
+   * Performs PostgresSQL-style bitwise shift on an int value with a long shift amount.
+   *
+   * @param x the int value to shift
+   * @param y the long shift amount
+   * @return the shifted value as long
+   */
+  public static long leftShift(int x, long y) {
+    int shift = (int) (((y % 32) + 32) % 32); // normalize to 0~31
+    return y >= 0 ? (long) x << shift : (long) x >> shift;
+  }
+
+  /**
+   * Performs PostgresSQL-style bitwise shift on a byte array.
+   * Positive shift: left shift.
+   * Negative shift: treated as positive shift with modulo arithmetic.
+   *
+   * @param bytes the input byte array
+   * @param y the shift amount in bits
+   * @return the shifted byte array
+   */
+  public static byte[] leftShift(byte[] bytes, int y) {
+    if (bytes.length == 0) {
+      return new byte[0];
+    }
+
+    int bitLen = bytes.length * 8;
+
+    // PostgreSQL behavior: always treat as left shift with modulo arithmetic
+    // Negative y becomes equivalent positive shift
+    int shift = ((y % bitLen) + bitLen) % bitLen;
+
+    if (shift == 0) {
+      return bytes.clone();
+    }
+
+    byte[] result = new byte[bytes.length];
+
+    // Always perform left shift (even for originally negative y)
+    int byteShift = shift / 8;
+    int bitShift = shift % 8;
+
+    for (int i = 0; i < bytes.length; i++) {
+      int srcIndex = i - byteShift;
+      int val = 0;
+
+      // Get the main byte
+      if (srcIndex >= 0) {
+        val = (bytes[srcIndex] & 0xFF) << bitShift;
+      }
+
+      // Get carry bits from previous byte
+      if (srcIndex - 1 >= 0 && bitShift != 0) {
+        val |= (bytes[srcIndex - 1] & 0xFF) >>> (8 - bitShift);
+      }
+
+      result[i] = (byte) val;
+    }
+    return result;
+  }
+
+  /**
+   * Performs PostgresSQL-style bitwise shift on ByteString.
+   *
+   * @param bytes the ByteString to shift
+   * @param y the shift amount in bits
+   * @return shifted ByteString
+   */
+  public static ByteString leftShift(ByteString bytes, int y) {
+    return new ByteString(leftShift(bytes.getBytes(), y));
+  }
+
+  /**
+   * Performs PostgresSQL-style bitwise shift on UByte.
+   * Overflow bits are masked to 8 bits.
+   */
+  public static UByte leftShift(UByte x, int y) {
+    int shift = ((y % 8) + 8) % 8;
+    int val = x.byteValue() & 0xFF;
+    val = (y >= 0) ? (val << shift) & 0xFF : (val >> shift) & 0xFF;
+    return UByte.valueOf((byte) val);
+  }
+
+  /**
+   * Performs PostgresSQL-style bitwise shift on UShort.
+   * Overflow bits are masked to 16 bits.
+   */
+  public static UShort leftShift(UShort x, int y) {
+    int shift = ((y % 16) + 16) % 16;
+    int val = x.shortValue() & 0xFFFF;
+    val = (y >= 0) ? (val << shift) & 0xFFFF : (val >> shift) & 0xFFFF;
+    return UShort.valueOf((short) val);
+  }
+
+  /**
+   * Performs PostgresSQL-style bitwise shift on UInteger.
+   * Overflow bits are masked to 32 bits.
+   */
+  public static UInteger leftShift(UInteger x, int y) {
+    int shift = ((y % 32) + 32) % 32;
+    long val = x.longValue() & 0xFFFFFFFFL;
+    val = (y >= 0) ? (val << shift) & 0xFFFFFFFFL : (val >> shift) & 0xFFFFFFFFL;
+    return UInteger.valueOf(val);
+  }
+
+  /**
+   * Performs PostgresSQL-style bitwise shift on ULong.
+   * Overflow bits are masked to 64 bits (long shifts naturally truncate).
+   */
+  public static ULong leftShift(ULong x, int y) {
+    int shift = ((y % 64) + 64) % 64;
+    long val = x.longValue();
+    val = (y >= 0) ? val << shift : val >> shift;
+    return ULong.valueOf(val);
   }
 
   // EXP
@@ -3803,6 +4458,18 @@ public class SqlFunctions {
     return CombinatoricsUtils.factorial(b0);
   }
 
+  /** SQL <code>HYPOT</code> operator applied to double values. */
+  public static double hypot(double a, double b) {
+    return Math.hypot(a, b);
+  }
+
+  /** SQL <code>HYPOT</code> operator applied to general numeric values. */
+  public static double hypot(Object a, Object b) {
+    final Number left = (Number) a;
+    final Number right = (Number) b;
+    return hypot(left.doubleValue(), right.doubleValue());
+  }
+
   /** SQL <code>IS_INF</code> operator applied to BigDecimal values. */
   public static boolean isInf(BigDecimal b0) {
     return Double.isInfinite(b0.doubleValue());
@@ -4133,8 +4800,7 @@ public class SqlFunctions {
     return b0 > b1 ? b1 : b0;
   }
 
-  public static @Nullable <T extends Comparable<T>> List<T> lesser(
-      @Nullable List<T> b0, @Nullable List<T> b1) {
+  public static @Nullable List lesser(@Nullable List b0, @Nullable List b1) {
     if (b0 == null) {
       return b1;
     }
@@ -4144,8 +4810,47 @@ public class SqlFunctions {
     return lt(b0, b1) ? b0 : b1;
   }
 
-  public static @Nullable <T extends Comparable<T>> List<T> greater(
-      @Nullable List<T> b0, @Nullable List<T> b1) {
+  public static @Nullable Map lesser(@Nullable Map b0, @Nullable Map b1) {
+    if (b0 == null) {
+      return b1;
+    }
+    if (b1 == null) {
+      return b0;
+    }
+    return lt(b0, b1) ? b0 : b1;
+  }
+
+  public static @Nullable Object[] lesser(@Nullable Object[] b0, @Nullable Object[] b1) {
+    if (b0 == null) {
+      return b1;
+    }
+    if (b1 == null) {
+      return b0;
+    }
+    return lt(b0, b1) ? b0 : b1;
+  }
+
+  public static @Nullable List greater(@Nullable List b0, @Nullable List b1) {
+    if (b0 == null) {
+      return b1;
+    }
+    if (b1 == null) {
+      return b0;
+    }
+    return gt(b0, b1) ? b0 : b1;
+  }
+
+  public static @Nullable Map greater(@Nullable Map b0, @Nullable Map b1) {
+    if (b0 == null) {
+      return b1;
+    }
+    if (b1 == null) {
+      return b0;
+    }
+    return gt(b0, b1) ? b0 : b1;
+  }
+
+  public static @Nullable Object[] greater(@Nullable Object[] b0, @Nullable Object[] b1) {
     if (b0 == null) {
       return b1;
     }
@@ -4227,6 +4932,18 @@ public class SqlFunctions {
   }
 
   public static boolean toBoolean(Number number) {
+    if (number instanceof BigDecimal) {
+      BigDecimal decimal = (BigDecimal) number;
+      return decimal.compareTo(BigDecimal.ZERO) != 0;
+    }
+    if (number instanceof Double) {
+      Double d = (Double) number;
+      return !d.equals(Double.valueOf(0));
+    }
+    if (number instanceof Float) {
+      Float f = (Float) number;
+      return !f.equals(Float.valueOf(0));
+    }
     return !number.equals(0);
   }
 
@@ -5316,6 +6033,22 @@ public class SqlFunctions {
     }
   }
 
+  public static @PolyNull ByteString byteArrayToByteString(byte @PolyNull [] bytes) {
+    if (bytes == null) {
+      return null;
+    } else {
+      return new ByteString(bytes);
+    }
+  }
+
+  public static byte @PolyNull [] byteStringToByteArray(@PolyNull ByteString s) {
+    if (s == null) {
+      return null;
+    } else {
+      return s.getBytes();
+    }
+  }
+
   /** Helper for CAST(... AS VARBINARY(maxLength)). */
   public static @PolyNull ByteString truncate(@PolyNull ByteString s, int maxLength) {
     if (s == null) {
@@ -5826,7 +6559,7 @@ public class SqlFunctions {
   /** SQL {@code TRANSLATE(string, search_chars, replacement_chars)}
    * function. */
   public static String translate3(String s, String search, String replacement) {
-    return org.apache.commons.lang3.StringUtils.replaceChars(s, search, replacement);
+    return Util.replaceChars(s, search, replacement);
   }
 
   /** SQL {@code REPLACE(string, search, replacement)} function. */
@@ -5839,7 +6572,7 @@ public class SqlFunctions {
       return s.replace(search, replacement);
     }
     // for MSSQL's REPLACE function, search pattern is case-insensitive during matching
-    return org.apache.commons.lang3.StringUtils.replaceIgnoreCase(s, search, replacement);
+    return Util.replaceIgnoreCase(s, search, replacement);
   }
 
   /** Helper for "array element reference". Caller has already ensured that
@@ -6376,6 +7109,43 @@ public class SqlFunctions {
     return map;
   }
 
+  /** Combines multiple query result lists into rows for the Combine operator.
+   *
+   * <p>Each input list contains maps representing rows from a query.
+   * The output is a list of Object arrays, where each array is a row
+   * with one element per query. The number of output rows equals the
+   * maximum size across all input lists. Shorter lists are padded with nulls.
+   *
+   * @param queryLists array of lists, one per query
+   * @return list of Object arrays representing combined rows
+   */
+  public static List<@Nullable Object[]> combineQueryResults(List[] queryLists) {
+    // Find the maximum row count across all queries
+    int maxRows = 0;
+    for (List list : queryLists) {
+      if (list.size() > maxRows) {
+        maxRows = list.size();
+      }
+    }
+
+    // Build the result rows
+    List<@Nullable Object[]> result = new ArrayList<>(maxRows);
+    for (int rowIdx = 0; rowIdx < maxRows; rowIdx++) {
+      @Nullable Object[] row = new Object[queryLists.length];
+      for (int queryIdx = 0; queryIdx < queryLists.length; queryIdx++) {
+        List queryList = queryLists[queryIdx];
+        if (rowIdx < queryList.size()) {
+          row[queryIdx] = queryList.get(rowIdx);
+        } else {
+          row[queryIdx] = null;
+        }
+      }
+      result.add(row);
+    }
+
+    return result;
+  }
+
   /** Support the STR_TO_MAP function. */
   public static Map strToMap(String string, String stringDelimiter, String keyValueDelimiter) {
     final Map map = new LinkedHashMap();
@@ -6887,5 +7657,113 @@ public class SqlFunctions {
     FILE,
     AUTHORITY,
     USERINFO;
+  }
+
+  /** SQL {@code AGE(timestamp1, timestamp2)} function. */
+  private static String age(long timestamp1, long timestamp2) {
+    // Convert timestamps to ZonedDateTime objects using UTC to avoid timezone issues
+    Instant instant1 = Instant.ofEpochMilli(timestamp1);
+    Instant instant2 = Instant.ofEpochMilli(timestamp2);
+
+    ZonedDateTime dateTime1 = ZonedDateTime.ofInstant(instant1, ZoneOffset.UTC);
+    ZonedDateTime dateTime2 = ZonedDateTime.ofInstant(instant2, ZoneOffset.UTC);
+
+    // Check if the original timestamps are in the correct order
+    boolean isNegative = timestamp1 < timestamp2;
+
+    // Ensure dateTime1 is later than dateTime2 for consistent calculation
+    if (dateTime1.isBefore(dateTime2)) {
+      ZonedDateTime temp = dateTime1;
+      dateTime1 = dateTime2;
+      dateTime2 = temp;
+    }
+
+    // Calculate period (years, months, days)
+    Period period = Period.between(dateTime2.toLocalDate(), dateTime1.toLocalDate());
+
+    // Calculate duration (hours, minutes, seconds, milliseconds)
+    Duration duration = Duration.between(dateTime2, dateTime1);
+
+    // Adjust for possible day overflow when time part is negative
+    if (dateTime1.toLocalTime().isBefore(dateTime2.toLocalTime())) {
+      period = period.minusDays(1);
+      duration = duration.plusDays(1);
+    }
+
+    // Extract components
+    int years = period.getYears();
+    int months = period.getMonths();
+    int days = period.getDays();
+
+    long hours = duration.toHours() % 24;
+    long minutes = duration.toMinutes() % 60;
+    long seconds = duration.getSeconds() % 60;
+    long millis = duration.toMillis() % 1000;
+
+    // Apply negative sign if needed
+    if (isNegative) {
+      years = -years;
+      months = -months;
+      days = -days;
+    }
+
+    StringBuilder sb = new StringBuilder();
+    if (years != 0) {
+      sb =
+          Math.abs(years) > 1 ? sb.append(years).append(" years ")
+              : sb.append(years).append(" year ");
+    }
+    if (months != 0) {
+      sb =
+          Math.abs(months) > 1 ? sb.append(months).append(" mons ")
+              : sb.append(months).append(" mon ");
+    }
+    if (days != 0) {
+      sb =
+          Math.abs(days) > 1 ? sb.append(days).append(" days ")
+              : sb.append(days).append(" day ");
+    }
+
+
+    // Add negative sign if needed for time part
+    if (isNegative && (hours != 0 || minutes != 0 || seconds != 0)) {
+      sb.append("-");
+    }
+    if (millis != 0) {
+      String millisString = BigDecimal.valueOf(millis)
+          .divide(BigDecimal.valueOf(1000))
+          .stripTrailingZeros()
+          .toPlainString().substring(2);
+      sb.append(
+          String.format(Locale.ROOT, "%02d:%02d:%02d.%s", hours, minutes, seconds,
+              millisString));
+    } else if (sb.length() != 0
+        && hours == 0 && minutes == 0 && seconds == 0 && millis == 0) {
+      return sb.toString().trim();
+    } else {
+      sb.append(String.format(Locale.ROOT, "%02d:%02d:%02d", hours, minutes, seconds));
+    }
+    return sb.toString().trim();
+  }
+
+  /** SQL {@code AGE(timestamp1, timestamp2)} function. Supports 1 or 2 timestamp arguments. */
+  public static String age(long... timestamps) {
+    if (timestamps.length == 0) {
+      throw new IllegalArgumentException("AGE function requires at least one timestamp argument");
+    }
+
+    if (timestamps.length == 1) {
+      // Single parameter version: calculate age relative to current time
+      long timestamp = timestamps[0];
+      // Use the actual current timestamp (including time component) in UTC
+      long currentTimestamp = Instant.now().toEpochMilli();
+      // Call the two-parameter version with current timestamp and input timestamp
+      return age(currentTimestamp, timestamp);
+    } else if (timestamps.length == 2) {
+      // Two parameter version: calculate age between two timestamps
+      return age(timestamps[0], timestamps[1]);
+    } else {
+      throw new IllegalArgumentException("AGE function supports only 1 or 2 timestamp arguments");
+    }
   }
 }

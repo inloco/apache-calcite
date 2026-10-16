@@ -27,8 +27,6 @@ import org.apache.calcite.util.Pair;
 import org.apache.calcite.util.Source;
 import org.apache.calcite.util.trace.CalciteLogger;
 
-import org.apache.commons.lang3.time.FastDateFormat;
-
 import au.com.bytecode.opencsv.CSVReader;
 
 import com.google.common.annotations.VisibleForTesting;
@@ -40,6 +38,7 @@ import java.io.IOException;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.text.ParseException;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
@@ -76,29 +75,53 @@ public class CsvEnumerator<E> implements Enumerator<E> {
   private final RowConverter<E> rowConverter;
   private @Nullable E current;
 
-  private static final FastDateFormat TIME_FORMAT_DATE;
-  private static final FastDateFormat TIME_FORMAT_TIME;
-  private static final FastDateFormat TIME_FORMAT_TIMESTAMP;
+  private static final TimeZone GMT = TimeZone.getTimeZone("GMT");
+
+  // FastDateFormat is thread-safe and lenient; mimic with ThreadLocal(SimpleDateFormat).
+  private static final ThreadLocal<SimpleDateFormat> TIME_FORMAT_DATE =
+      ThreadLocal.withInitial(() -> {
+        SimpleDateFormat f = new SimpleDateFormat("yyyy-MM-dd", Locale.ROOT);
+        f.setTimeZone(GMT);
+        f.setLenient(true);
+        return f;
+      });
+
+  private static final ThreadLocal<SimpleDateFormat> TIME_FORMAT_TIME =
+      ThreadLocal.withInitial(() -> {
+        SimpleDateFormat f = new SimpleDateFormat("HH:mm:ss", Locale.ROOT);
+        f.setTimeZone(GMT);
+        f.setLenient(true);
+        return f;
+      });
+
+  private static final ThreadLocal<SimpleDateFormat> TIME_FORMAT_TIMESTAMP =
+      ThreadLocal.withInitial(() -> {
+        SimpleDateFormat f = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.ROOT);
+        f.setTimeZone(GMT);
+        f.setLenient(true);
+        return f;
+      });
+
+  /** Clears per-thread cached date/time formatters to avoid ThreadLocal leaks in long-lived
+   * thread pools or container environments. Must be called on the same thread that used them. */
+  private static void clearTimeFormats() {
+    TIME_FORMAT_DATE.remove();
+    TIME_FORMAT_TIME.remove();
+    TIME_FORMAT_TIMESTAMP.remove();
+  }
   private static final Pattern DECIMAL_TYPE_PATTERN = Pattern
       .compile("\"decimal\\(([0-9]+),([0-9]+)\\)");
 
-  static {
-    final TimeZone gmt = TimeZone.getTimeZone("GMT");
-    TIME_FORMAT_DATE = FastDateFormat.getInstance("yyyy-MM-dd", gmt);
-    TIME_FORMAT_TIME = FastDateFormat.getInstance("HH:mm:ss", gmt);
-    TIME_FORMAT_TIMESTAMP =
-        FastDateFormat.getInstance("yyyy-MM-dd HH:mm:ss", gmt);
-  }
-
   public CsvEnumerator(Source source, AtomicBoolean cancelFlag,
-      List<RelDataType> fieldTypes, List<Integer> fields) {
+      List<RelDataType> fieldTypes, List<Integer> fields, char separator) {
     //noinspection unchecked
     this(source, cancelFlag, false, null,
-        (RowConverter<E>) converter(fieldTypes, fields));
+        (RowConverter<E>) converter(fieldTypes, fields), separator);
   }
 
   public CsvEnumerator(Source source, AtomicBoolean cancelFlag, boolean stream,
-      @Nullable String @Nullable [] filterValues, RowConverter<E> rowConverter) {
+      @Nullable String @Nullable [] filterValues, RowConverter<E> rowConverter,
+      char separator) {
     this.cancelFlag = cancelFlag;
     this.rowConverter = rowConverter;
     this.filterValues =
@@ -106,9 +129,9 @@ public class CsvEnumerator<E> implements Enumerator<E> {
             : ImmutableNullableList.copyOf(filterValues);
     try {
       if (stream) {
-        this.reader = new CsvStreamReader(source);
+        this.reader = new CsvStreamReader(source, separator);
       } else {
-        this.reader = openCsv(source);
+        this.reader = openCsv(source, separator);
       }
       this.reader.readNext(); // skip header row
     } catch (IOException e) {
@@ -134,14 +157,15 @@ public class CsvEnumerator<E> implements Enumerator<E> {
   /** Deduces the names and types of a table's columns by reading the first line
    * of a CSV file. */
   public static RelDataType deduceRowType(JavaTypeFactory typeFactory,
-      Source source, @Nullable List<RelDataType> fieldTypes, Boolean stream) {
+      Source source, @Nullable List<RelDataType> fieldTypes, Boolean stream,
+      char separator) {
     final List<RelDataType> types = new ArrayList<>();
     final List<String> names = new ArrayList<>();
     if (stream) {
       names.add(FileSchemaFactory.ROWTIME_COLUMN_NAME);
       types.add(typeFactory.createSqlType(SqlTypeName.TIMESTAMP));
     }
-    try (CSVReader reader = openCsv(source)) {
+    try (CSVReader reader = openCsv(source, separator)) {
       String[] strings = reader.readNext();
       if (strings == null) {
         strings = new String[]{"EmptyFileHasNoColumns:boolean"};
@@ -225,9 +249,9 @@ public class CsvEnumerator<E> implements Enumerator<E> {
     return typeFactory.createStructType(Pair.zip(names, types));
   }
 
-  static CSVReader openCsv(Source source) throws IOException {
+  static CSVReader openCsv(Source source, char separator) throws IOException {
     requireNonNull(source, "source");
-    return new CSVReader(source.reader());
+    return new CSVReader(source.reader(), separator);
   }
 
   @Override public E current() {
@@ -252,7 +276,11 @@ public class CsvEnumerator<E> implements Enumerator<E> {
             continue;
           }
           current = null;
-          reader.close();
+          try {
+            reader.close();
+          } finally {
+            clearTimeFormats();
+          }
           return false;
         }
         if (filterValues != null) {
@@ -282,6 +310,8 @@ public class CsvEnumerator<E> implements Enumerator<E> {
       reader.close();
     } catch (IOException e) {
       throw new RuntimeException("Error closing CSV reader", e);
+    } finally {
+      clearTimeFormats();
     }
   }
 
@@ -357,7 +387,7 @@ public class CsvEnumerator<E> implements Enumerator<E> {
           return null;
         }
         try {
-          Date date = TIME_FORMAT_DATE.parse(string);
+          Date date = TIME_FORMAT_DATE.get().parse(string);
           return (int) (date.getTime() / DateTimeUtils.MILLIS_PER_DAY);
         } catch (ParseException e) {
           return null;
@@ -367,7 +397,7 @@ public class CsvEnumerator<E> implements Enumerator<E> {
           return null;
         }
         try {
-          Date date = TIME_FORMAT_TIME.parse(string);
+          Date date = TIME_FORMAT_TIME.get().parse(string);
           return (int) date.getTime();
         } catch (ParseException e) {
           return null;
@@ -377,7 +407,7 @@ public class CsvEnumerator<E> implements Enumerator<E> {
           return null;
         }
         try {
-          Date date = TIME_FORMAT_TIMESTAMP.parse(string);
+          Date date = TIME_FORMAT_TIMESTAMP.get().parse(string);
           return date.getTime();
         } catch (ParseException e) {
           return null;

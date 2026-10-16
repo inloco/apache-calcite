@@ -40,8 +40,10 @@ import org.apache.calcite.sql.test.SqlTestFactory;
 import org.apache.calcite.sql.test.SqlTests;
 import org.apache.calcite.sql.type.SqlTypeName;
 import org.apache.calcite.sql.util.SqlShuttle;
+import org.apache.calcite.sql.validate.SqlAbstractConformance;
 import org.apache.calcite.sql.validate.SqlConformance;
 import org.apache.calcite.sql.validate.SqlConformanceEnum;
+import org.apache.calcite.sql.validate.SqlDelegatingConformance;
 import org.apache.calcite.test.IntervalTest;
 import org.apache.calcite.tools.Hoist;
 import org.apache.calcite.util.Bug;
@@ -65,6 +67,7 @@ import org.junit.jupiter.api.Test;
 import java.io.Reader;
 import java.io.StringReader;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
 import java.util.Random;
@@ -566,6 +569,7 @@ public class SqlParserTest {
       "UNIQUE",                        "92", "99", "2003", "2011", "2014", "c",
       "UNKNOWN",                       "92", "99", "2003", "2011", "2014", "c",
       "UNNEST",                              "99", "2003", "2011", "2014", "c",
+      "UNSIGNED",                                                          "c",
       "UNTIL",                         "92", "99", "2003",
       "UPDATE",                        "92", "99", "2003", "2011", "2014", "c",
       "UPPER",                         "92",               "2011", "2014", "c",
@@ -627,6 +631,12 @@ public class SqlParserTest {
       SqlDialect.DatabaseProduct.POSTGRESQL.getDialect();
   private static final SqlDialect REDSHIFT =
       SqlDialect.DatabaseProduct.REDSHIFT.getDialect();
+  private static final SqlConformance COLON_FIELD =
+      new SqlDelegatingConformance(SqlConformanceEnum.DEFAULT) {
+        @Override public boolean isColonFieldAccessAllowed() {
+          return true;
+        }
+      };
 
   /** Creates the test fixture that determines the behavior of tests.
    * Sub-classes that, say, test different parser implementations should
@@ -1413,6 +1423,42 @@ public class SqlParserTest {
             + "FROM `T`");
   }
 
+  @Test void testUnsigned() {
+    sql("SELECT CAST(1 AS UNSIGNED)")
+        .ok("SELECT CAST(1 AS INTEGER UNSIGNED)");
+    sql("SELECT CAST(1 AS INTEGER UNSIGNED)")
+        .same();
+    sql("SELECT CAST(1 AS TINYINT UNSIGNED)")
+        .same();
+    sql("SELECT CAST(1 AS SMALLINT UNSIGNED)")
+        .same();
+    sql("SELECT CAST(1 AS BIGINT UNSIGNED)")
+        .same();
+    List<SqlConformance> unsignedNotSupport =
+        Arrays.asList(
+          SqlConformanceEnum.ORACLE_10,
+          SqlConformanceEnum.ORACLE_12,
+          SqlConformanceEnum.BIG_QUERY,
+          SqlConformanceEnum.PRAGMATIC_99,
+          SqlConformanceEnum.PRAGMATIC_2003,
+          SqlConformanceEnum.PRESTO,
+          SqlConformanceEnum.SQL_SERVER_2008,
+          SqlConformanceEnum.STRICT_92,
+          SqlConformanceEnum.STRICT_99,
+          SqlConformanceEnum.STRICT_2003);
+    unsignedNotSupport.forEach(conformance -> {
+      sql("SELECT CAST(1 AS ^UNSIGNED^)")
+          .withConformance(conformance)
+          .fails("Support for UNSIGNED data types is not enabled");
+    });
+    sql("SELECT CAST(1 AS ^UNSIGNED^)")
+        .withConformance(new SqlAbstractConformance() {
+          @Override public boolean supportsUnsignedTypes() {
+            return false;
+          }
+        }).fails("Support for UNSIGNED data types is not enabled");
+  }
+
   @Test void testRow() {
     sql("select t.r.\"EXPR$1\", t.r.\"EXPR$0\" from (select (1,2) r from sales.depts) t")
         .ok("SELECT `T`.`R`.`EXPR$1`, `T`.`R`.`EXPR$0`\n"
@@ -1517,6 +1563,21 @@ public class SqlParserTest {
         .ok("(ROW((SELECT `DEPTNO`\n"
             + "FROM `DEPT`\n"
             + "WHERE (`DEPT`.`DEPTNO` = `EMP`.`DEPTNO`)), `EMP`.`ENAME`))");
+  }
+
+  @Test void testRowWithCase() {
+    expr("ROW(CASE WHEN x IS NULL THEN NULL ELSE x END)")
+        .ok("(ROW((CASE WHEN (`X` IS NULL) THEN NULL ELSE `X` END)))");
+    expr("ROW(1, CASE x WHEN 1 THEN 2 ELSE 3 END)")
+        .ok("(ROW(1, (CASE WHEN (`X` = 1) THEN 2 ELSE 3 END)))");
+    expr("ROW(ROW(CASE WHEN x IS NULL THEN NULL ELSE x END))")
+        .ok("(ROW((ROW((CASE WHEN (`X` IS NULL) THEN NULL ELSE `X` END)))))");
+  }
+
+  @Test void testRowWithStar() {
+    sql("select row(*) from emp")
+        .ok("SELECT (ROW(*))\n"
+            + "FROM `EMP`");
   }
 
   @Test void testRowWithDot() {
@@ -2271,6 +2332,116 @@ public class SqlParserTest {
         .ok("(`FOO`(`A`, `B`).`C`)");
   }
 
+  @Test void testColonFieldAccessMode() {
+    final SqlParserFixture expr = fixture().withConformance(COLON_FIELD).expression();
+    final SqlParserFixture sql = fixture().withConformance(COLON_FIELD);
+    // Colon field access is rejected in the default conformance.
+    expr("v^:^field")
+        .fails("(?s).*Encountered \":.*\".*");
+    // Core forms: identifier, dotted identifier chain, bracketed string key,
+    // bracketed integer index.
+    expr.sql("v:field")
+        .ok("(`V`:`field`)");
+    expr.sql("v:type")
+        .ok("(`V`:`type`)");
+    expr.sql("v:key")
+        .ok("(`V`:`key`)");
+    expr.sql("v:camelCase")
+        .ok("(`V`:`camelCase`)");
+    expr.sql("v:OWNER")
+        .ok("(`V`:`OWNER`)");
+    expr.sql("v:field.nested")
+        .ok("(`V`:`field`.`nested`)");
+    expr.sql("v:['field name']")
+        .ok("(`V`:['field name'])");
+    expr.sql("v:[1]")
+        .ok("(`V`:[1])");
+    expr.sql("v:[^empno^]")
+        .fails("(?s).*Unknown identifier 'EMPNO'.*");
+    // Bracket segments chain directly after an identifier or another bracket.
+    expr.sql("v:item[1]")
+        .ok("(`V`:`item`[1])");
+    expr.sql("v:item[^key^]")
+        .fails("(?s).*Unknown identifier 'KEY'.*");
+    expr.sql("v:item[^type^]")
+        .fails("(?s).*Unknown identifier 'TYPE'.*");
+    expr.sql("v:item[1].price")
+        .ok("(`V`:`item`[1].`price`)");
+    expr.sql("v:['key'][0]")
+        .ok("(`V`:['key'][0])");
+    // Colon attaches to any expression with an outer bracket or identifier.
+    expr.sql("arr[1]:field")
+        .ok("(`ARR`[1]:`field`)");
+    expr.sql("obj['x']:nested")
+        .ok("(`OBJ`['x']:`nested`)");
+    sql.sql(
+        "select v:field, v:['field name'], arr[1]:field, obj['x']:nested from t")
+        .ok("SELECT (`V`:`field`), (`V`:['field name']), (`ARR`[1]:`field`), "
+            + "(`OBJ`['x']:`nested`)\n"
+            + "FROM `T`");
+  }
+
+  @Test void testColonFieldAccessEdgeCases() {
+    final SqlParserFixture expr = fixture().withConformance(COLON_FIELD).expression();
+    // Mixed identifier / bracket chains are accepted.
+    expr.sql("v:field['leaf']")
+        .ok("(`V`:`field`['leaf'])");
+    expr.sql("v:['field name'].leaf")
+        .ok("(`V`:['field name'].`leaf`)");
+    expr.sql("v:field^.^['leaf']")
+        .fails("(?s).*Encountered \"\\. \\[\".*");
+    expr.sql("v:field[2]")
+        .ok("(`V`:`field`[2])");
+    expr.sql("arr[1]:field[2]")
+        .ok("(`ARR`[1]:`field`[2])");
+    expr.sql("v.field:nested")
+        .ok("(`V`.`FIELD`:`nested`)");
+    expr.sql("obj['x']:nested['y']")
+        .ok("(`OBJ`['x']:`nested`['y'])");
+    // Colon has postfix binding: the left operand is the whole expression atom.
+    expr.sql("a = b:field")
+        .ok("(`A` = (`B`:`field`))");
+    expr.sql("a + b:field")
+        .ok("(`A` + (`B`:`field`))");
+    expr.sql("a * arr[1]:field")
+        .ok("(`A` * (`ARR`[1]:`field`))");
+    // Colon attaches to non-identifier bases too: literals and function calls
+    // that already form a self-delimited expression atom.
+    expr.sql("null:field")
+        .ok("(NULL:`field`)");
+    expr.sql("foo(a):field")
+        .ok("(`FOO`(`A`):`field`)");
+    expr.sql("foo(v:field, arr[1]:field, obj['x']:nested['y'])")
+        .ok("`FOO`((`V`:`field`), (`ARR`[1]:`field`), (`OBJ`['x']:`nested`['y']))");
+    // Only one colon per expression; no nested colon paths.
+    expr.sql("v:field^:^leaf")
+        .fails("(?s).*Encountered \":.*\".*");
+    expr.sql("v:['field name']^:^leaf")
+        .fails("(?s).*Encountered \":.*\".*");
+    // Expressions (function calls, arithmetic) are not allowed inside
+    // colon-path brackets; only string, identifier and integer literals.
+    expr.sql("v:[^OFFSET^(1)]")
+        .fails("(?s).*OFFSET.*");
+    expr.sql("v:[^1.5^]")
+        .fails("(?s).*Encountered \"1\\.5\".*");
+    expr.sql("v:[^1e0^]")
+        .fails("(?s).*Encountered \"1e0\".*");
+    expr.sql("v:[^i^ + 1]")
+        .fails("(?s).*Encountered \"i.*");
+  }
+
+  @Test void testColonFieldAccessRejectsMemberFunctionCalls() {
+    final SqlParserFixture expr = fixture().withConformance(COLON_FIELD).expression();
+    expr.sql("v:field.func^(^)")
+        .fails("(?s).*Encountered \"\\(\".*");
+    expr.sql("v:[1].func^(^)")
+        .fails("(?s).*Encountered \"\\(\".*");
+    expr.sql("obj['x']:nested.func^(^)")
+        .fails("(?s).*Encountered \"\\(\".*");
+    expr.sql("v:field[1].func^(^)")
+        .fails("(?s).*Encountered \"\\(\".*");
+  }
+
   @Test void testFunctionInFunction() {
     expr("ln(power(2,2))")
         .ok("LN(POWER(2, 2))");
@@ -2667,6 +2838,22 @@ public class SqlParserTest {
         + "UNION\n"
         + "SELECT *\n"
         + "FROM `EMP2`";
+    sql(sql).ok(expected);
+  }
+
+  /** Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-7533">[CALCITE-7533]
+   * Parser rejects parenthesized query as the body of a WITH clause</a>. */
+  @Test void testWithParenthesizedBody() {
+    final String sql = "select * from (\n"
+        + "  with q as (select 1 as id)\n"
+        + "  (select id from q) union all (select id from q)) t";
+    final String expected = "SELECT *\n"
+        + "FROM (WITH `Q` AS (SELECT 1 AS `ID`) SELECT `ID`\n"
+        + "FROM `Q`\n"
+        + "UNION ALL\n"
+        + "SELECT `ID`\n"
+        + "FROM `Q`) AS `T`";
     sql(sql).ok(expected);
   }
 
@@ -6537,6 +6724,22 @@ public class SqlParserTest {
     assertThat(str1, is(toLinux(sqlNodeVisited1.toString())));
   }
 
+  @Test void testVisitSqlUpdateWithSqlShuttle() {
+    final String sql = "UPDATE emps AS e SET e.sal = 0 WHERE e.sal < 0";
+    final SqlNode sqlNode = sql(sql).node();
+    final SqlNode sqlNodeVisited = sqlNode.accept(new SqlShuttle() {
+      @Override public SqlNode visit(SqlIdentifier identifier) {
+        // Copy the identifier in order to return a new SqlUpdate.
+        return identifier.clone(identifier.getParserPosition());
+      }
+    });
+    assertNotSame(sqlNodeVisited, sqlNode);
+    assertThat(sqlNodeVisited.getKind(), is(SqlKind.UPDATE));
+    final String str1 = "UPDATE `EMPS` AS `E` SET `E`.`SAL` = 0\n"
+        + "WHERE `E`.`SAL` < 0";
+    assertThat(str1, is(toLinux(sqlNodeVisited.toString())));
+  }
+
   @Test void testVisitSqlMatchRecognizeWithSqlShuttle() {
     final String sql = "select *\n"
         + "from emp \n"
@@ -6633,6 +6836,7 @@ public class SqlParserTest {
             + "Was expecting one of:\n"
             + "    <EOF> \n"
             + "    \"\\(\" \\.\\.\\.\n"
+            + "    \":\" \\.\\.\\.\n"
             + "    \"\\.\" \\.\\.\\..*");
     expr("interval '1-2' year ^to^ day")
         .fails(ANY);
@@ -7250,6 +7454,8 @@ public class SqlParserTest {
         .ok("CAST(`X` AS INTERVAL MINUTE TO SECOND)");
     expr("cast(interval '3-2' year to month as CHAR(5))")
         .ok("CAST(INTERVAL '3-2' YEAR TO MONTH AS CHAR(5))");
+    expr("cast(x as ^interval^)")
+        .fails("(?s)Encountered \"interval \\)\".*");
   }
 
   @Test void testCastToVarchar() {
@@ -7777,6 +7983,8 @@ public class SqlParserTest {
     sql("SELECT tbl.foo(0).col.bar(2, 3) FROM tbl")
         .ok("SELECT ((`TBL`.`FOO`(0).`COL`).`BAR`(2, 3))\n"
             + "FROM `TBL`");
+    expr("rr[1].func^(^)")
+        .fails("(?s).*Encountered \"\\(\".*");
   }
 
   @Test void testUnicodeLiteral() {
@@ -9081,6 +9289,27 @@ public class SqlParserTest {
         .ok("JSON_OBJECT(KEY `KEY` VALUE `VALUE` NULL ON NULL)");
   }
 
+  @Test void testJsonObjectInColonFieldAccessMode() {
+    assumeFalse(fixture().tester.isUnparserTest());
+    final SqlParserFixture expr = fixture().withConformance(COLON_FIELD).expression();
+    expr.sql("json_object(key v:field value arr[1]:field)")
+        .ok("JSON_OBJECT(KEY (`V`:`field`) VALUE (`ARR`[1]:`field`) NULL ON NULL)");
+    expr.sql("json_object(key v:field.field value col)")
+        .ok("JSON_OBJECT(KEY (`V`:`field`.`field`) VALUE `COL` NULL ON NULL)");
+    expr.sql("json_object(v:field value 1)")
+        .ok("JSON_OBJECT(KEY (`V`:`field`) VALUE 1 NULL ON NULL)");
+    expr.sql("json_object(v:field^,^ 1)")
+        .fails("(?s).*Unexpected symbol ','. Was expecting 'VALUE'.*");
+    expr.sql("json_object('foo': col^,^ 1)")
+        .fails("(?s).*Unexpected symbol ','. Was expecting 'VALUE'.*");
+    expr.sql("json_object('foo'^,^ 'bar')")
+        .fails("(?s).*Unexpected symbol ','. Was expecting 'VALUE'.*");
+    // Colon mode reserves ':' for field access, so JSON colon-pair syntax
+    // must use the KEY ... VALUE form instead.
+    expr.sql("json_object('foo'^:^ 'bar')")
+        .fails("(?s).*Unexpected symbol ':'. Was expecting 'VALUE'.*");
+  }
+
   @Test void testJsonType() {
     expr("json_type('11.56')")
         .ok("JSON_TYPE('11.56')");
@@ -9149,6 +9378,22 @@ public class SqlParserTest {
         .ok("JSON_OBJECTAGG(KEY `K_COLUMN` VALUE "
             + "JSON_OBJECT(KEY `K_COLUMN` VALUE `V_COLUMN` NULL ON NULL) "
             + "FORMAT JSON NULL ON NULL)");
+  }
+
+  @Test void testJsonObjectAggInColonFieldAccessMode() {
+    assumeFalse(fixture().tester.isUnparserTest());
+    final SqlParserFixture expr = fixture().withConformance(COLON_FIELD).expression();
+    expr.sql("json_objectagg(key v:['key'] value obj['x']:nested['y'])")
+        .ok("JSON_OBJECTAGG(KEY (`V`:['key']) VALUE "
+            + "(`OBJ`['x']:`nested`['y']) NULL ON NULL)");
+    expr.sql("json_objectagg(key v:field.field value col)")
+        .ok("JSON_OBJECTAGG(KEY (`V`:`field`.`field`) VALUE `COL` NULL ON NULL)");
+    expr.sql("json_objectagg(v:field value col)")
+        .ok("JSON_OBJECTAGG(KEY (`V`:`field`) VALUE `COL` NULL ON NULL)");
+    expr.sql("json_objectagg(v:field^,^ col)")
+        .fails("(?s).*Unexpected symbol ','. Was expecting 'VALUE'.*");
+    expr.sql("json_objectagg('k'^,^ 1)")
+        .fails("(?s).*Unexpected symbol ','. Was expecting 'VALUE'.*");
   }
 
   /** Test case for
@@ -9309,6 +9554,23 @@ public class SqlParserTest {
 
     final String sql2 = "SELECT * FROM ((((((((((((SELECT * FROM tab)))))))))))) X";
     sql(sql2).ok(expected);
+  }
+
+  /** Test case for <a href="https://issues.apache.org/jira/browse/CALCITE-7498">[CALCITE-7498]
+   * The parser rejects the example hints from the documentation</a>. */
+  @Test void testDocumentationExample() {
+    final String sql = "SELECT /*+ hint1, hint2(a='1', b='2') */ *\n"
+        + "FROM emp /*+ hint3(5, 'x') */\n"
+        + "JOIN dept /*+ hint4(c=id), hint5 */\n"
+        + "ON emp.deptno = dept.deptno";
+    final String expected = "SELECT\n"
+        + "/*+ `HINT1`, `HINT2`(`A` = '1', `B` = '2') */\n"
+        + "*\n"
+        + "FROM `EMP`\n"
+        + "/*+ `HINT3`(5, 'x') */\n"
+        + "INNER JOIN `DEPT`\n"
+        + "/*+ `HINT4`(`C` = `ID`), `HINT5` */ ON (`EMP`.`DEPTNO` = `DEPT`.`DEPTNO`)";
+    sql(sql).ok(expected);
   }
 
   @Test void testQueryHint() {
@@ -9829,6 +10091,17 @@ public class SqlParserTest {
       }
     }
 
+    static SqlNode deepCopy(SqlNode sqlNode) {
+      return sqlNode.accept(new SqlShuttle() {
+        @Override public @Nullable SqlNode visit(final SqlCall call) {
+          // Handler always creates a new copy of 'call'
+          CallCopyingArgHandler argHandler = new CallCopyingArgHandler(call, true);
+          call.getOperator().acceptCall(this, call, false, argHandler);
+          return argHandler.result();
+        }
+      });
+    }
+
     @Override public void checkList(SqlTestFactory factory, StringAndPos sap,
         @Nullable SqlDialect dialect, UnaryOperator<String> converter,
         List<String> expected) {
@@ -9858,6 +10131,12 @@ public class SqlParserTest {
       final Random random = new Random();
       final String sql3 = toSqlString(sqlNodeList, randomize(random));
       assertThat(sql3, notNullValue());
+
+      // Make a deep copy of the SqlNodeList, unparse it.
+      final SqlNodeList sqlNodeList3 = (SqlNodeList) deepCopy(sqlNodeList);
+      final String sql4 = toSqlString(sqlNodeList3, simple());
+      // Should be the same as we started with.
+      assertThat(sql4, is(sql1));
     }
 
     @Override public void check(SqlTestFactory factory, StringAndPos sap,
@@ -9902,6 +10181,11 @@ public class SqlParserTest {
           parseStmtAndHandleEx(factory2, sql1, parser -> { });
       final String sql4 = sqlNode4.toSqlString(simple()).getSql();
       assertThat(sql4, is(sql1));
+
+      // Make a deep copy of the original SqlNode, unparse it.
+      final SqlNode sqlNode5 = deepCopy(sqlNode);
+      final String actual5 = sqlNode5.toSqlString(writerTransform).getSql();
+      assertThat(converter.apply(actual5), is(expected));
     }
 
     @Override public void checkExp(SqlTestFactory factory, StringAndPos sap,

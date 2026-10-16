@@ -659,7 +659,7 @@ public class MongoAdapterTest implements SchemaFactory {
             "STATE=CA; CITY=NORWALK")
         .explainContains("PLAN=MongoToEnumerableConverter\n"
             + "  MongoProject(STATE=[CAST(ITEM($0, 'state')):VARCHAR(2)], CITY=[CAST(ITEM($0, 'city')):VARCHAR(20)])\n"
-            + "    MongoFilter(condition=[=(CAST(CAST(ITEM($0, 'state')):VARCHAR(2)):CHAR(2), 'CA')])\n"
+            + "    MongoFilter(condition=[=(CAST(ITEM($0, 'state')):VARCHAR(2), 'CA')])\n"
             + "      MongoTableScan(table=[[mongo_raw, zips]])");
   }
 
@@ -918,5 +918,264 @@ public class MongoAdapterTest implements SchemaFactory {
                 "{$project: {STATE: '$state', CITY: '$city'}}",
                 "{$sort: {STATE: 1}}"))
         .returns("STATE=ME; CITY=LEWISTON\nSTATE=VT; CITY=BRATTLEBORO\n");
+  }
+
+  /** Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-7079">[CALCITE-7079]
+   * Mongo adapter: MongoDB Adapter unable to translate multiple NOT EQUALS expressions
+   * combined with AND  </a>. */
+  @Test void testMultiNeFilterContition() {
+    assertModel(MODEL)
+        .query("select city, state from zips where city <> 'ABERDEEN' and city <> 'AIKEN'  "
+            + "order by city")
+        .limit(3)
+        .queryContains(
+            mongoChecker(
+                "{$match: {city: {$nin: [\"ABERDEEN\", \"AIKEN\"]}}}",
+                "{$project: {CITY: '$city', STATE: '$state'}}",
+                "{$sort: {CITY: 1}}"))
+        .returnsOrdered("CITY=ALTON; STATE=TX",
+            "CITY=AMES; STATE=IA",
+            "CITY=ANCHORAGE; STATE=AK");
+
+    assertModel(MODEL)
+        .query("select city, state from zips where city <> 'ABERDEEN' and city <> 'AIKEN'  "
+            + "or (state <> 'IA' and state <> 'TX') order by city")
+        .limit(3)
+        .queryContains(
+            mongoChecker(
+                "{$match: {$or: [{city: {$nin: [\"ABERDEEN\", \"AIKEN\"]}}, {state: {$nin: [\"IA\", \"TX\"]}}]}}",
+                "{$project: {CITY: '$city', STATE: '$state'}}",
+                "{$sort: {CITY: 1}}"))
+        .returnsOrdered("CITY=ABERDEEN; STATE=SD",
+            "CITY=AIKEN; STATE=SC",
+            "CITY=ALTON; STATE=TX");
+
+    assertModel(MODEL)
+        .query("select city, state from zips where city <> 'ABERDEEN' and city <> 'AIKEN'  "
+            + "and state <> 'IA' order by city")
+        .limit(3)
+        .queryContains(
+            mongoChecker(
+                "{$match: {city: {$nin: [\"ABERDEEN\", \"AIKEN\"]}, state: {$ne: \"IA\"}}}",
+                "{$project: {CITY: '$city', STATE: '$state'}}",
+                "{$sort: {CITY: 1}}"))
+        .returnsOrdered("CITY=ALTON; STATE=TX",
+            "CITY=ANCHORAGE; STATE=AK",
+            "CITY=BALTIMORE; STATE=MD");
+
+    assertModel(MODEL)
+        .query("select city, state from zips where city <> 'ABERDEEN' and city <> 'AIKEN'  "
+            + "and (state <> 'IA' or state <> 'TX') order by city")
+        .limit(3)
+        .queryContains(
+            mongoChecker(
+                "{$match: {city: {$nin: [\"ABERDEEN\", \"AIKEN\"]}, state: {$ne: null}}}",
+                "{$project: {CITY: '$city', STATE: '$state'}}",
+                "{$sort: {CITY: 1}}"))
+        .returnsOrdered("CITY=ALTON; STATE=TX",
+            "CITY=AMES; STATE=IA",
+            "CITY=ANCHORAGE; STATE=AK");
+
+    assertModel(MODEL)
+        .query("select city, state from zips where city <> 'ABERDEEN' and city <> 'AIKEN'  "
+            + "and state IS NOT NULL order by city")
+        .limit(3)
+        .queryContains(
+            mongoChecker(
+                "{$match: {city: {$nin: [\"ABERDEEN\", \"AIKEN\"]}, state: {$ne: null}}}",
+                "{$project: {CITY: '$city', STATE: '$state'}}",
+                "{$sort: {CITY: 1}}"))
+        .returnsOrdered("CITY=ALTON; STATE=TX",
+            "CITY=AMES; STATE=IA",
+            "CITY=ANCHORAGE; STATE=AK");
+
+    assertModel(MODEL)
+        .query("select city, state from zips where city <> 'ABERDEEN' and city <> 'AIKEN'  "
+            + "and state IS NULL order by city")
+        .limit(3)
+        .queryContains(
+            mongoChecker(
+                "{$match: {city: {$nin: [\"ABERDEEN\", \"AIKEN\"]}, state: {$eq: null}}}",
+                "{$project: {CITY: '$city', STATE: '$state'}}",
+                "{$sort: {CITY: 1}}"))
+        .returnsOrdered("");
+  }
+
+  /** Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-7406">[CALCITE-7406]
+   * Add abs function (enabled in Mongodb library)</a>. */
+  @Test void testAbs() {
+    assertModel(MODEL)
+        .query("select abs(pop) from zips")
+        .runs()
+        .queryContains(
+            mongoChecker(
+                "{$project:{EXPR$0:{$abs:['$pop']}}}"));
+  }
+
+  /** Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-7406">[CALCITE-7406]
+   * Add abs function (enabled in Mongodb library)</a>. */
+  @Test void testAbsAlias() {
+    assertModel(MODEL)
+        .query("select abs(pop) as pop_result from zips"
+            + " order by pop")
+        .limit(3)
+        .runs()
+        .queryContains(
+            mongoChecker(
+                "{$project:{POP_RESULT:{$abs:['$pop']},POP:'$pop'}}",
+                "{$sort:{POP:1}}"))
+        .returnsOrdered(
+            "POP_RESULT=21",
+            "POP_RESULT=17522",
+            "POP_RESULT=22576");
+  }
+
+  /** Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-7406">[CALCITE-7406]
+   * Add abs function (enabled in Mongodb library)</a>. */
+  @Test void testAbsMin() {
+    assertModel(MODEL)
+        .query("select abs(min(pop)) from zips")
+        .returnsOrdered("EXPR$0=21")
+        .queryContains(
+            mongoChecker(
+                "{$project:{POP:'$pop'}}",
+                "{$group:{_id:{},_0:{$min:'$POP'}}}",
+                "{$project:{EXPR$0:{$abs:['$_0']}}}"));
+  }
+
+  /** Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-7404">[CALCITE-7404]
+   * Incorrect Field Alias in MongoDB project Stage</a>. */
+  @Test void testAggFunctionMinFilter() {
+    assertModel(MODEL)
+        .query("select min(pop>5000) as pop_result from zips")
+        .queryContains(
+            mongoChecker(
+                "{$project:{_0:{$gt:['$pop',{$literal:5000}]}}}",
+                "{$group:{_id: {},POP_RESULT:{$min:'$_0'}}}"))
+        .returns("POP_RESULT=false\n");
+  }
+
+  /** Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-7404">[CALCITE-7404]
+   * Incorrect Field Alias in MongoDB project Stage</a>. */
+  @Test void testAliasNameOrderBy() {
+    assertModel(MODEL)
+        .query("select pop as pop_a from zips"
+            + " order by pop_a")
+        .limit(3)
+        .queryContains(
+            mongoChecker(
+                "{$project:{POP_A:'$pop'}}",
+                "{$sort: {POP_A: 1}}"))
+        .returnsOrdered("POP_A=21",
+            "POP_A=17522",
+            "POP_A=22576");
+  }
+
+  /** Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-7404">[CALCITE-7404]
+   * Incorrect Field Alias in MongoDB project Stage</a>. */
+  @Test void testNameOrderBy() {
+    assertModel(MODEL)
+        .query("select pop as pop_a from zips"
+            + " order by pop")
+        .limit(3)
+        .queryContains(
+            mongoChecker(
+                "{$project:{POP_A:'$pop'}}",
+                "{$sort: {POP_A: 1}}"))
+        .returnsOrdered("POP_A=21",
+            "POP_A=17522",
+            "POP_A=22576");
+  }
+
+  /** Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-7413">[CALCITE-7413]
+   * Add Concat and Substring function (enabled in Mongodb library)</a>. */
+  @Test void testConcat() {
+    assertModel(MODEL)
+        .query("SELECT city || ' ' || state  from zips"
+            + " order by pop")
+        .limit(3)
+        .queryContains(
+            mongoChecker(
+                "{$project: {EXPR$0:{$concat:[{$concat:['$city',{$literal: ' '}]},'$state']},POP:'$pop'}}",
+                "{$sort:{POP:1}}"))
+        .returnsOrdered("EXPR$0=PENTAGON DC",
+            "EXPR$0=BRATTLEBORO VT",
+            "EXPR$0=RUTLAND VT");
+  }
+
+  /** Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-7413">[CALCITE-7413]
+   * Add Concat and Substring function (enabled in Mongodb library)</a>. */
+  @Test void testAliasNameConcat() {
+    assertModel(MODEL)
+        .query("SELECT city || ' ' || state AS full_name from zips"
+            + " order by pop")
+        .limit(3)
+        .queryContains(
+            mongoChecker(
+                "{$project: {FULL_NAME:{$concat:[{$concat:['$city',{$literal: ' '}]},'$state']},POP:'$pop'}}",
+                "{$sort:{POP:1}}"))
+        .returnsOrdered("FULL_NAME=PENTAGON DC",
+            "FULL_NAME=BRATTLEBORO VT",
+            "FULL_NAME=RUTLAND VT");
+  }
+
+  /** Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-7413">[CALCITE-7413]
+   * Add Concat and Substring function (enabled in Mongodb library)</a>. */
+  @Test void testAliasNameMultipleConcat() {
+    assertModel(MODEL)
+        .query("SELECT city || ',' || ',' || state AS full_name from zips"
+            + " order by pop")
+        .limit(3)
+        .queryContains(
+            mongoChecker(
+                "{$project:{FULL_NAME:{$concat:[{$concat:[{$concat:['$city',{$literal:','}]},{$literal:','}]},'$state']},POP:'$pop'}}",
+                "{$sort:{POP:1}}"))
+        .returnsOrdered("FULL_NAME=PENTAGON,,DC",
+            "FULL_NAME=BRATTLEBORO,,VT",
+            "FULL_NAME=RUTLAND,,VT");
+  }
+
+  /** Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-7413">[CALCITE-7413]
+   * Add Concat and Substring function (enabled in Mongodb library)</a>. */
+  @Test void testSubstring() {
+    assertModel(MODEL)
+        .query("SELECT SUBSTRING(city FROM 1 FOR 2) from zips"
+            + " order by pop")
+        .limit(3)
+        .queryContains(
+            mongoChecker(
+                "{$project:{EXPR$0:{$substrCP:['$city',{$literal:1},{$literal:2}]},POP:'$pop'}}",
+                "{$sort:{POP:1}}"))
+        .returnsOrdered("EXPR$0=EN",
+            "EXPR$0=RA",
+            "EXPR$0=UT");
+  }
+
+  /** Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-7413">[CALCITE-7413]
+   * Add Concat and Substring function (enabled in Mongodb library)</a>. */
+  @Test void testAliasNameSubstring() {
+    assertModel(MODEL)
+        .query("SELECT SUBSTRING(city FROM 1 FOR 2) AS city_substring from zips"
+            + " order by pop")
+        .limit(3)
+        .queryContains(
+            mongoChecker(
+                "{$project:{CITY_SUBSTRING:{$substrCP:['$city',{$literal:1},{$literal:2}]},POP:'$pop'}}",
+                "{$sort:{POP:1}}"))
+        .returnsOrdered("CITY_SUBSTRING=EN",
+            "CITY_SUBSTRING=RA",
+            "CITY_SUBSTRING=UT");
   }
 }

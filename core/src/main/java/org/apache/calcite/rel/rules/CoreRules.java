@@ -17,6 +17,7 @@
 package org.apache.calcite.rel.rules;
 
 import org.apache.calcite.linq4j.function.Experimental;
+import org.apache.calcite.plan.RelOptRule;
 import org.apache.calcite.plan.RelOptUtil.Exists;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.core.Aggregate;
@@ -32,6 +33,7 @@ import org.apache.calcite.rel.core.SetOp;
 import org.apache.calcite.rel.core.Sort;
 import org.apache.calcite.rel.core.TableFunctionScan;
 import org.apache.calcite.rel.core.TableScan;
+import org.apache.calcite.rel.core.Uncollect;
 import org.apache.calcite.rel.core.Union;
 import org.apache.calcite.rel.core.Values;
 import org.apache.calcite.rel.logical.LogicalAggregate;
@@ -64,6 +66,12 @@ public class CoreRules {
   public static final AggregateProjectMergeRule AGGREGATE_PROJECT_MERGE =
       AggregateProjectMergeRule.Config.DEFAULT.toRule();
 
+    /** Rule that removes redundant grouping keys from an {@link Aggregate}
+     * when they are functionally determined by earlier grouping keys. */
+  public static final AggregateRemoveDuplicateKeysRule
+      AGGREGATE_REMOVE_DUPLICATE_KEYS =
+      AggregateRemoveDuplicateKeysRule.Config.DEFAULT.toRule();
+
   /** Rule that removes constant keys from an {@link Aggregate}. */
   public static final AggregateProjectPullUpConstantsRule
       AGGREGATE_PROJECT_PULL_UP_CONSTANTS =
@@ -90,6 +98,12 @@ public class CoreRules {
    * an {@link Aggregate} to simpler forms. */
   public static final AggregateReduceFunctionsRule AGGREGATE_REDUCE_FUNCTIONS =
       AggregateReduceFunctionsRule.Config.DEFAULT.toRule();
+
+  /** Rule that eliminates aggregate functions of GROUP BY keys
+   * in an {@link Aggregate}. */
+  public static final AggregateReduceFunctionsOnGroupKeysRule
+      AGGREGATE_REDUCE_FUNCTIONS_ON_GROUP_KEYS =
+      AggregateReduceFunctionsOnGroupKeysRule.Config.DEFAULT.toRule();
 
   /** Rule that matches an {@link Aggregate} on an {@link Aggregate},
    * and merges into a single Aggregate if the top aggregate's group key is a
@@ -120,7 +134,6 @@ public class CoreRules {
       AggregateExpandDistinctAggregatesRule.Config.DEFAULT.toRule();
 
   /** As {@link #AGGREGATE_EXPAND_DISTINCT_AGGREGATES} but generates a Join. */
-  @RuleConfig(value = "JOIN")
   public static final AggregateExpandDistinctAggregatesRule
       AGGREGATE_EXPAND_DISTINCT_AGGREGATES_TO_JOIN =
       AggregateExpandDistinctAggregatesRule.Config.JOIN.toRule();
@@ -158,9 +171,14 @@ public class CoreRules {
 
   /** As {@link #AGGREGATE_JOIN_TRANSPOSE}, but extended to push down aggregate
    * functions. */
-  @RuleConfig(value = "EXTENDED")
   public static final AggregateJoinTransposeRule AGGREGATE_JOIN_TRANSPOSE_EXTENDED =
       AggregateJoinTransposeRule.Config.EXTENDED.toRule();
+
+  /** Rule that creates a {@link Join#isSemiJoin semi-join} from a
+   * {@link Aggregate} on top of a {@link Join} with an {@link Aggregate} as its
+   * right input. */
+  public static final SemiJoinRule.AggregateToSemiJoinRule AGGREGATE_TO_SEMI_JOIN =
+      SemiJoinRule.AggregateToSemiJoinRule.AggregateToSemiJoinRuleConfig.DEFAULT.toRule();
 
   /** Rule that pushes an {@link Aggregate}
    * past a non-distinct {@link Union}. */
@@ -180,13 +198,11 @@ public class CoreRules {
 
   /** As {@link #AGGREGATE_UNION_AGGREGATE}, but matches an {@code Aggregate}
    * only as the left input of the {@code Union}. */
-  @RuleConfig(value = "AGG_FIRST")
   public static final AggregateUnionAggregateRule AGGREGATE_UNION_AGGREGATE_FIRST =
       AggregateUnionAggregateRule.Config.AGG_FIRST.toRule();
 
   /** As {@link #AGGREGATE_UNION_AGGREGATE}, but matches an {@code Aggregate}
    * only as the right input of the {@code Union}. */
-  @RuleConfig(value = "AGG_SECOND")
   public static final AggregateUnionAggregateRule AGGREGATE_UNION_AGGREGATE_SECOND =
       AggregateUnionAggregateRule.Config.AGG_SECOND.toRule();
 
@@ -238,7 +254,6 @@ public class CoreRules {
       ExchangeRemoveConstantKeysRule.Config.DEFAULT.toRule();
 
   /** Rule that removes constants inside a {@link LogicalSortExchange}. */
-  @RuleConfig(value = "SORT")
   public static final ExchangeRemoveConstantKeysRule SORT_EXCHANGE_REMOVE_CONSTANT_KEYS =
       ExchangeRemoveConstantKeysRule.Config.SORT.toRule();
 
@@ -281,7 +296,7 @@ public class CoreRules {
    * {@link org.apache.calcite.rel.rules.FilterProjectTransposeRule}.
    *
    * <p>It does not allow a Filter to be pushed past the Project if
-   * {@link RexUtil#containsCorrelation there is a correlation condition}
+   * {@link RexUtil#containsCorrelation(org.apache.calcite.rex.RexNode) there is a correlation condition}
    * anywhere in the Filter, since in some cases it can prevent a
    * {@link Correlate} from being de-correlated.
    */
@@ -309,7 +324,6 @@ public class CoreRules {
   /** Rule that matches a {@link Filter} on an
    * {@link org.apache.calcite.adapter.enumerable.EnumerableInterpreter} on a
    * {@link TableScan}. */
-  @RuleConfig(value = "INTERPRETER")
   public static final FilterTableScanRule FILTER_INTERPRETER_SCAN =
       FilterTableScanRule.Config.INTERPRETER.toRule();
 
@@ -359,14 +373,12 @@ public class CoreRules {
 
   /** Rule that flattens an {@link Intersect} on an {@code Intersect}
    * into a single {@code Intersect}. */
-  @RuleConfig(value = "INTERSECT")
   public static final UnionMergeRule INTERSECT_MERGE =
       UnionMergeRule.Config.INTERSECT.toRule();
 
   /** Rule that removes a {@link Intersect} if it has only one input.
    *
    * @see PruneEmptyRules#UNION_INSTANCE */
-  @RuleConfig(value = "INTERSECT")
   public static final UnionEliminatorRule INTERSECT_REMOVE =
       UnionEliminatorRule.Config.INTERSECT.toRule();
 
@@ -375,11 +387,16 @@ public class CoreRules {
   public static final IntersectReorderRule INTERSECT_REORDER =
       IntersectReorderRule.Config.DEFAULT.toRule();
 
-  /** Rule that translates a distinct
-   * {@link Intersect} into a group of operators
-   * composed of {@link Union}, {@link Aggregate}, etc. */
+  /** Rule that translates a distinct {@link Intersect} into a group of operators
+   * composed of {@link Union}, {@link Aggregate}, etc. The rule also applies a
+   * partial aggregation pushdown into the union branches. */
   public static final IntersectToDistinctRule INTERSECT_TO_DISTINCT =
       IntersectToDistinctRule.Config.DEFAULT.toRule();
+
+  /** As {@link #INTERSECT_TO_DISTINCT} but not applying (partial) aggregate pushdown
+   * into the union branches (behaviour introduced in CALCITE-6893). */
+  public static final IntersectToDistinctRule INTERSECT_TO_DISTINCT_NO_AGGREGATE_PUSHDOWN =
+      IntersectToDistinctRule.Config.NO_AGGREGATE_PUSHDOWN.toRule();
 
   /** Rule that translates a {@link Intersect}
    * into a {@link Exists} subquery. */
@@ -391,17 +408,14 @@ public class CoreRules {
           IntersectToSemiJoinRule.Config.DEFAULT.toRule();
 
   /** Rule that translates a {@link Union} to {@link Filter}. */
-  @RuleConfig(value = "UNION")
   public static final SetOpToFilterRule UNION_FILTER_TO_FILTER =
       SetOpToFilterRule.Config.UNION.toRule();
 
   /** Rule that translates a {@link Intersect} to {@link Filter}. */
-  @RuleConfig(value = "INTERSECT")
   public static final SetOpToFilterRule INTERSECT_FILTER_TO_FILTER =
       SetOpToFilterRule.Config.INTERSECT.toRule();
 
   /** Rule that translates a {@link Minus} to {@link Filter}. */
-  @RuleConfig(value = "MINUS")
   public static final SetOpToFilterRule MINUS_FILTER_TO_FILTER =
       SetOpToFilterRule.Config.MINUS.toRule();
 
@@ -461,7 +475,6 @@ public class CoreRules {
 
   /** As {@link #PROJECT_FILTER_TRANSPOSE}, but pushes down project and filter
    * expressions whole, not field references. */
-  @RuleConfig(value = "PROJECT_FILTER")
   public static final ProjectFilterTransposeRule
       PROJECT_FILTER_TRANSPOSE_WHOLE_EXPRESSIONS =
       ProjectFilterTransposeRule.Config.PROJECT_FILTER.toRule();
@@ -486,7 +499,6 @@ public class CoreRules {
    *
    * @see #FILTER_SUB_QUERY_TO_CORRELATE
    * @see #JOIN_SUB_QUERY_TO_CORRELATE */
-  @RuleConfig(value = "PROJECT")
   public static final SubQueryRemoveRule PROJECT_SUB_QUERY_TO_CORRELATE =
       SubQueryRemoveRule.Config.PROJECT.toRule();
 
@@ -495,7 +507,6 @@ public class CoreRules {
    *
    * @see #PROJECT_SUB_QUERY_TO_CORRELATE
    * @see #JOIN_SUB_QUERY_TO_CORRELATE */
-  @RuleConfig(value = "FILTER")
   public static final SubQueryRemoveRule FILTER_SUB_QUERY_TO_CORRELATE =
       SubQueryRemoveRule.Config.FILTER.toRule();
 
@@ -504,9 +515,22 @@ public class CoreRules {
    *
    * @see #PROJECT_SUB_QUERY_TO_CORRELATE
    * @see #FILTER_SUB_QUERY_TO_CORRELATE */
-  @RuleConfig(value = "JOIN")
   public static final SubQueryRemoveRule JOIN_SUB_QUERY_TO_CORRELATE =
       SubQueryRemoveRule.Config.JOIN.toRule();
+
+  /** Rule that converts sub-queries from filter expressions into
+   * {@link Correlate} instances. It will rewrite SOME/EXISTS/IN to a LEFT MARK type Correlate. */
+  public static final SubQueryRemoveRule FILTER_SUB_QUERY_TO_MARK_CORRELATE =
+      SubQueryRemoveRule.Config.FILTER_ENABLE_MARK_JOIN.toRule();
+
+  /** Rule that converts sub-queries from project expressions into
+   * {@link Correlate} instances. It will rewrite SOME/EXISTS/IN to a LEFT MARK type Correlate. */
+  public static final SubQueryRemoveRule PROJECT_SUB_QUERY_TO_MARK_CORRELATE =
+      SubQueryRemoveRule.Config.PROJECT_ENABLE_MARK_JOIN.toRule();
+
+  /** Rule that converts mark join to semi/anti join. */
+  public static final MarkToSemiOrAntiJoinRule MARK_TO_SEMI_OR_ANTI_JOIN_RULE =
+      MarkToSemiOrAntiJoinRule.Config.DEFAULT.toRule();
 
   /** Rule that converts SUM to SUM0 in OVER clauses in a project list. */
   public static final ProjectOverSumToSum0Rule PROJECT_OVER_SUM_TO_SUM0_RULE =
@@ -581,7 +605,6 @@ public class CoreRules {
 
   /** As {@link #PROJECT_TABLE_SCAN}, but with an intervening
    * {@link org.apache.calcite.adapter.enumerable.EnumerableInterpreter}. */
-  @RuleConfig(value = "INTERPRETER")
   public static final ProjectTableScanRule PROJECT_INTERPRETER_TABLE_SCAN =
       ProjectTableScanRule.Config.INTERPRETER.toRule();
 
@@ -620,6 +643,10 @@ public class CoreRules {
   public static final JoinCommuteRule JOIN_COMMUTE_OUTER =
       JoinCommuteRule.Config.SWAP_OUTER.toRule();
 
+  /** As {@link #JOIN_COMMUTE} but only swaps RIGHT joins to LEFT joins. */
+  public static final JoinCommuteRule JOIN_COMMUTE_RIGHT_TO_LEFT =
+      JoinCommuteRule.Config.RIGHT_TO_LEFT_ONLY.toRule();
+
   /** Rule to convert an
    * {@link LogicalJoin inner join} to a
    * {@link LogicalFilter filter} on top of a
@@ -634,33 +661,28 @@ public class CoreRules {
 
   /** As {@link #JOIN_PROJECT_BOTH_TRANSPOSE} but only the left input is
    * a {@link LogicalProject}. */
-  @RuleConfig(value = "LEFT")
   public static final JoinProjectTransposeRule JOIN_PROJECT_LEFT_TRANSPOSE =
       JoinProjectTransposeRule.Config.LEFT.toRule();
 
   /** As {@link #JOIN_PROJECT_BOTH_TRANSPOSE} but only the right input is
    * a {@link LogicalProject}. */
-  @RuleConfig(value = "RIGHT")
   public static final JoinProjectTransposeRule JOIN_PROJECT_RIGHT_TRANSPOSE =
       JoinProjectTransposeRule.Config.RIGHT.toRule();
 
   /** As {@link #JOIN_PROJECT_BOTH_TRANSPOSE} but match outer as well as
    * inner join. */
-  @RuleConfig(value = "OUTER")
   public static final JoinProjectTransposeRule
       JOIN_PROJECT_BOTH_TRANSPOSE_INCLUDE_OUTER =
       JoinProjectTransposeRule.Config.OUTER.toRule();
 
   /** As {@link #JOIN_PROJECT_LEFT_TRANSPOSE} but match outer as well as
    * inner join. */
-  @RuleConfig(value = "LEFT_OUTER")
   public static final JoinProjectTransposeRule
       JOIN_PROJECT_LEFT_TRANSPOSE_INCLUDE_OUTER =
       JoinProjectTransposeRule.Config.LEFT_OUTER.toRule();
 
   /** As {@link #JOIN_PROJECT_RIGHT_TRANSPOSE} but match outer as well as
    * inner join. */
-  @RuleConfig(value = "RIGHT_OUTER")
   public static final JoinProjectTransposeRule
       JOIN_PROJECT_RIGHT_TRANSPOSE_INCLUDE_OUTER =
       JoinProjectTransposeRule.Config.RIGHT_OUTER.toRule();
@@ -715,13 +737,11 @@ public class CoreRules {
 
   /** Rule that pushes a {@link Join}
    * past a non-distinct {@link Union} as its left input. */
-  @RuleConfig(value = "LEFT")
   public static final JoinUnionTransposeRule JOIN_LEFT_UNION_TRANSPOSE =
       JoinUnionTransposeRule.Config.LEFT.toRule();
 
   /** Rule that pushes a {@link Join}
    * past a non-distinct {@link Union} as its right input. */
-  @RuleConfig(value = "RIGHT")
   public static final JoinUnionTransposeRule JOIN_RIGHT_UNION_TRANSPOSE =
       JoinUnionTransposeRule.Config.RIGHT.toRule();
 
@@ -749,19 +769,16 @@ public class CoreRules {
   /** Rule that matches a {@link LogicalJoin} whose inputs are both a
    * {@link MultiJoin} with intervening {@link LogicalProject}s,
    * and pulls the Projects up above the Join. */
-  @RuleConfig(value = "BOTH_PROJECT")
   public static final MultiJoinProjectTransposeRule MULTI_JOIN_BOTH_PROJECT =
       MultiJoinProjectTransposeRule.Config.BOTH_PROJECT.toRule();
 
   /** As {@link #MULTI_JOIN_BOTH_PROJECT} but only the left input has
    * an intervening Project. */
-  @RuleConfig(value = "LEFT_PROJECT")
   public static final MultiJoinProjectTransposeRule MULTI_JOIN_LEFT_PROJECT =
       MultiJoinProjectTransposeRule.Config.LEFT_PROJECT.toRule();
 
   /** As {@link #MULTI_JOIN_BOTH_PROJECT} but only the right input has
    * an intervening Project. */
-  @RuleConfig(value = "RIGHT_PROJECT")
   public static final MultiJoinProjectTransposeRule MULTI_JOIN_RIGHT_PROJECT =
       MultiJoinProjectTransposeRule.Config.RIGHT_PROJECT.toRule();
 
@@ -822,7 +839,6 @@ public class CoreRules {
 
   /** Rule that merge a {@link Sort} representing the Limit semantics and
    * another {@link Sort} representing the Limit or TOPN semantics. */
-  @RuleConfig(value = "LIMIT_MERGE")
   public static final SortMergeRule LIMIT_MERGE =
       SortMergeRule.Config.LIMIT_MERGE.toRule();
 
@@ -885,14 +901,12 @@ public class CoreRules {
   /** Rule that merges a {@link Filter} onto an underlying
    * {@link org.apache.calcite.rel.logical.LogicalValues},
    * resulting in a {@code Values} with potentially fewer rows. */
-  @RuleConfig(value = "FILTER")
   public static final ValuesReduceRule FILTER_VALUES_MERGE =
       ValuesReduceRule.Config.FILTER.toRule();
 
   /** Rule that merges a {@link Project} onto an underlying
    * {@link org.apache.calcite.rel.logical.LogicalValues},
    * resulting in a {@code Values} with different columns. */
-  @RuleConfig(value = "PROJECT")
   public static final ValuesReduceRule PROJECT_VALUES_MERGE =
       ValuesReduceRule.Config.PROJECT.toRule();
 
@@ -901,7 +915,6 @@ public class CoreRules {
    * {@link org.apache.calcite.rel.logical.LogicalValues},
    * resulting in a {@code Values} with different columns
    * and potentially fewer rows. */
-  @RuleConfig(value = "PROJECT_FILTER")
   public static final ValuesReduceRule PROJECT_FILTER_VALUES_MERGE =
       ValuesReduceRule.Config.PROJECT_FILTER.toRule();
 
@@ -929,28 +942,56 @@ public class CoreRules {
   /** Rule that expands disjunction in the condition of a {@link Filter}.
    *
    * @see #EXPAND_JOIN_DISJUNCTION_GLOBAL */
-  @RuleConfig(value = "FILTER")
   public static final ExpandDisjunctionForTableRule EXPAND_FILTER_DISJUNCTION_GLOBAL =
       ExpandDisjunctionForTableRule.Config.FILTER.toRule();
 
   /** Rule that expands disjunction in the condition of a {@link Join}.
    *
    * @see #EXPAND_FILTER_DISJUNCTION_GLOBAL */
-  @RuleConfig(value = "JOIN")
   public static final ExpandDisjunctionForTableRule EXPAND_JOIN_DISJUNCTION_GLOBAL =
       ExpandDisjunctionForTableRule.Config.JOIN.toRule();
 
   /** Rule that expands disjunction in the condition of a {@link Filter} for join inputs.
    *
    * @see #EXPAND_JOIN_DISJUNCTION_LOCAL */
-  @RuleConfig(value = "FILTER")
   public static final ExpandDisjunctionForJoinInputsRule EXPAND_FILTER_DISJUNCTION_LOCAL =
       ExpandDisjunctionForJoinInputsRule.Config.FILTER.toRule();
 
   /** Rule that expands disjunction in the condition of a {@link Join} for join inputs.
    *
    * @see #EXPAND_FILTER_DISJUNCTION_LOCAL */
-  @RuleConfig(value = "JOIN")
   public static final ExpandDisjunctionForJoinInputsRule EXPAND_JOIN_DISJUNCTION_LOCAL =
       ExpandDisjunctionForJoinInputsRule.Config.JOIN.toRule();
+
+  /** Rule that convert FULL JOIN to LEFT JOIN and RIGHT JOIN. */
+  public static final FullToLeftAndRightJoinRule FULL_TO_LEFT_AND_RIGHT_JOIN =
+      FullToLeftAndRightJoinRule.Config.DEFAULT.toRule();
+
+  /** Rule that converts true filtered aggregates into CASE-style filtered aggregates. */
+  public static final AggregateFilterToCaseRule AGGREGATE_FILTER_TO_CASE =
+      AggregateFilterToCaseRule.Config.DEFAULT.toRule();
+
+  /** Rule that converts an aggregate on of a filter into a filtered aggregate. */
+  public static final AggregateFilterToFilteredAggregateRule
+      AGGREGATE_FILTER_TO_FILTERED_AGGREGATE =
+      AggregateFilterToFilteredAggregateRule.Config.DEFAULT.toRule();
+
+  /** Rule that remove duplicate {@link Sort} keys. */
+  public static final SortRemoveDuplicateKeysRule SORT_REMOVE_DUPLICATE_KEYS =
+      SortRemoveDuplicateKeysRule.Config.DEFAULT.toRule();
+
+  /** Rule that converts GROUPING SETS of {@link Aggregate}
+   *  into equivalent {@link Union} ALL of GROUP BY operations. */
+  public static final AggregateGroupingSetsToUnionRule AGGREGATE_GROUPING_SETS_TO_UNION =
+      AggregateGroupingSetsToUnionRule.Config.DEFAULT.toRule();
+
+  /** Rule that converts a {@link Correlate} after an {@link Uncollect} into a simple
+   * Uncollect, if possible. */
+  public static final RelOptRule UNNEST_DECORRELATE =
+      UnnestDecorrelateRule.Config.DEFAULT.toRule();
+
+  /** Rule that converts a {@link Correlate} after an {@link Project} of an
+   * {@link Uncollect} into a simple Uncollect, if possible. */
+  public static final RelOptRule UNNEST_PROJECT_DECORRELATE =
+      UnnestDecorrelateRule.Config.WITH_PROJECT.toRule();
 }

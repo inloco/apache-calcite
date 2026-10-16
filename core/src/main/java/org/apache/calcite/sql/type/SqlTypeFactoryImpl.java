@@ -327,7 +327,7 @@ public class SqlTypeFactoryImpl extends RelDataTypeFactoryImpl {
       RelDataTypeFamily family = type.getFamily();
 
       final SqlTypeName typeName = type.getSqlTypeName();
-      if (typeName == SqlTypeName.NULL) {
+      if (typeName == SqlTypeName.NULL || typeName == SqlTypeName.UNKNOWN) {
         continue;
       }
 
@@ -341,6 +341,8 @@ public class SqlTypeFactoryImpl extends RelDataTypeFactoryImpl {
             ? createSqlType(typeName, type.getPrecision())
             : createSqlType(typeName);
         type = createTypeWithNullability(type, originalType.isNullable());
+        // update java type's family
+        family = type.getFamily();
       }
 
       if (resultType == null) {

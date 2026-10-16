@@ -24,6 +24,7 @@ import org.apache.calcite.sql.SqlCallBinding;
 import org.apache.calcite.sql.SqlKind;
 import org.apache.calcite.sql.SqlNode;
 import org.apache.calcite.sql.SqlOperandCountRange;
+import org.apache.calcite.sql.SqlOperator;
 import org.apache.calcite.sql.SqlOperatorBinding;
 import org.apache.calcite.sql.SqlSpecialOperator;
 import org.apache.calcite.sql.SqlWriter;
@@ -160,6 +161,29 @@ public class SqlItemOperator extends SqlSpecialOperator {
       RelDataType keyType =
           requireNonNull(operandType.getKeyType(), "operandType.getKeyType()");
       SqlTypeName sqlTypeName = keyType.getSqlTypeName();
+      if (sqlTypeName == SqlTypeName.VARIANT) {
+        // Allow any key type to be used when the map keys have a VARIANT type
+        return OperandTypes.family(SqlTypeFamily.ANY);
+      } else if (sqlTypeName == SqlTypeName.ROW) {
+        // Check that the type of the argument is exactly the key type
+        return new SqlSingleOperandTypeChecker() {
+          @Override public boolean checkSingleOperandType(
+              SqlCallBinding callBinding, SqlNode operand,
+              int iFormalOperand, boolean throwOnFailure) {
+            // operand 0 of ITEM is the indexed object, operand 1 is the key value
+            RelDataType operandType = callBinding.getOperandType(1);
+            boolean match = operandType.equals(keyType);
+            if (!match && throwOnFailure) {
+              throw callBinding.newValidationSignatureError();
+            }
+            return match;
+          }
+
+          @Override public String getAllowedSignatures(SqlOperator op, String opName) {
+            return "[" + keyType.getSqlTypeName() + "]";
+          }
+        };
+      }
       return OperandTypes.family(
           requireNonNull(sqlTypeName.getFamily(),
               () -> "keyType.getSqlTypeName().getFamily() null, type is " + sqlTypeName));
@@ -179,7 +203,7 @@ public class SqlItemOperator extends SqlSpecialOperator {
       return "<ARRAY>[<INTEGER>]\n"
           + "<MAP>[<ANY>]\n"
           + "<ROW>[<CHARACTER>|<INTEGER>]\n"
-          + "<VARIANT>[<ANY>]";
+          + "<VARIANT>[<CHARACTER>|<INTEGER>]";
     } else {
       return "<ARRAY>[" + name + "(<INTEGER>)]";
     }
@@ -227,7 +251,7 @@ public class SqlItemOperator extends SqlSpecialOperator {
             + indexType + "'");
       }
       if (operandType.isNullable()) {
-        fieldType = typeFactory.createTypeWithNullability(fieldType, true);
+        fieldType = typeFactory.enforceTypeWithNullability(fieldType, true);
       }
       return fieldType;
     case ANY:

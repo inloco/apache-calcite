@@ -44,6 +44,8 @@ import org.apache.calcite.rel.convert.ConverterRule;
 import org.apache.calcite.rel.core.JoinRelType;
 import org.apache.calcite.rel.core.RelFactories;
 import org.apache.calcite.rel.core.TableScan;
+import org.apache.calcite.rel.hint.HintPredicates;
+import org.apache.calcite.rel.hint.HintStrategyTable;
 import org.apache.calcite.rel.logical.LogicalFilter;
 import org.apache.calcite.rel.logical.LogicalProject;
 import org.apache.calcite.rel.metadata.RelMetadataQuery;
@@ -75,6 +77,7 @@ import org.apache.calcite.sql.type.SqlTypeName;
 import org.apache.calcite.sql.util.SqlOperatorTables;
 import org.apache.calcite.sql.validate.SqlValidator;
 import org.apache.calcite.sql.validate.SqlValidatorScope;
+import org.apache.calcite.sql2rel.SqlToRelConverter;
 import org.apache.calcite.test.CalciteAssert;
 import org.apache.calcite.test.RelBuilderTest;
 import org.apache.calcite.test.schemata.tpch.TpchSchema;
@@ -314,7 +317,7 @@ class PlannerTest {
         "select * from \"emps\" where \"deptno\" < 10\n"
             + "union all\n"
             + "select * from \"emps\" where \"empid\" > 2",
-        "[OR(<($1, 10), >($0, 2))]");
+        "[OR(<(CAST($1):INTEGER NOT NULL, 10), >(CAST($0):INTEGER NOT NULL, 2))]");
   }
 
   /** Test case for
@@ -333,7 +336,7 @@ class PlannerTest {
         "select * from \"emps\" where \"deptno\" < 10\n"
             + "union all\n"
             + "select * from \"emps\" where \"deptno\" < 10 and \"empid\" > 1",
-        "[<($1, 10)]");
+        "[<(CAST($1):INTEGER NOT NULL, 10)]");
   }
 
   @Test void testMetadataUnionPredicates4() throws Exception {
@@ -341,14 +344,14 @@ class PlannerTest {
         "select * from \"emps\" where \"deptno\" < 10\n"
             + "union all\n"
             + "select * from \"emps\" where \"deptno\" < 10 or \"empid\" > 1",
-        "[OR(<($1, 10), >($0, 1))]");
+        "[OR(<(CAST($1):INTEGER NOT NULL, 10), >(CAST($0):INTEGER NOT NULL, 1))]");
   }
 
   @Test void testMetadataUnionPredicates5() throws Exception {
     final String sql = "select * from \"emps\" where \"deptno\" < 10\n"
         + "union all\n"
         + "select * from \"emps\" where \"deptno\" < 10 and false";
-    checkMetadataPredicates(sql, "[<($1, 10)]");
+    checkMetadataPredicates(sql, "[<(CAST($1):INTEGER NOT NULL, 10)]");
   }
 
   /** Tests predicates that can be pulled-up from an Aggregate with
@@ -374,7 +377,7 @@ class PlannerTest {
     final String sql = "select \"deptno\", count(\"deptno\")\n"
         + "from \"emps\" where \"deptno\" > 10\n"
         + "group by \"deptno\"";
-    checkMetadataPredicates(sql, "[>($0, 10)]");
+    checkMetadataPredicates(sql, "[>(CAST($0):INTEGER NOT NULL, 10)]");
   }
 
   /** Unit test that parses, validates, converts and plans. */
@@ -556,6 +559,33 @@ class PlannerTest {
             + "    EnumerableTableScan(table=[[hr, emps]])\n"));
   }
 
+  /** Test case for <a href="https://issues.apache.org/jira/browse/CALCITE-7506">[CALCITE-7506]
+   * RelWriterImpl does not output hints</a>. */
+  @Test void testHints() throws Exception {
+    HintStrategyTable hintTable = HintStrategyTable.builder()
+        .hintStrategy("hint", HintPredicates.PROJECT).build();
+    final SchemaPlus rootSchema = Frameworks.createRootSchema(true);
+    final FrameworkConfig config = Frameworks.newConfigBuilder()
+        .parserConfig(SqlParser.Config.DEFAULT)
+        .defaultSchema(CalciteAssert.addSchema(rootSchema, CalciteAssert.SchemaSpec.HR))
+        .sqlToRelConverterConfig(SqlToRelConverter.CONFIG.withHintStrategyTable(hintTable))
+        .build();
+    Planner planner = Frameworks.getPlanner(config);
+    final String sql = "select /*+ hint */ * from \"emps\" order by \"emps\".\"deptno\"";
+    SqlNode parse = planner.parse(sql);
+    SqlNode validate = planner.validate(parse);
+    RelNode convert = planner.rel(validate).project();
+    String explain =
+        Util.toLinux(
+            RelOptUtil.dumpPlan("", convert, SqlExplainFormat.TEXT,
+            SqlExplainLevel.ALL_ATTRIBUTES));
+    // Cannot check for exact equality since ALL_ATTRIBUTES prints node ids,
+    // which change from run to run
+    assertThat(explain,
+        containsString("LogicalSort(sort0=[$1], dir0=[ASC])[[HINT inheritPath:[]]]: "
+            + "rowcount = 100.0, cumulative cost = {300.0 rows, 15337.544595161893 cpu, 0.0 io}"));
+  }
+
   /** Test case for
    * <a href="https://issues.apache.org/jira/browse/CALCITE-2554">[CALCITE-2554]
    * Enrich EnumerableHashJoin operator with order preserving information</a>.
@@ -732,7 +762,7 @@ class PlannerTest {
     String typeString = SqlTests.getTypeString(insertSourceType);
     assertThat(typeString,
         is("RecordType(INTEGER NOT NULL empid, INTEGER NOT NULL deptno, "
-            + "JavaType(class java.lang.String) name, REAL NOT NULL salary, "
+            + "VARCHAR name, REAL NOT NULL salary, "
             + "INTEGER NOT NULL commission) NOT NULL"));
   }
 

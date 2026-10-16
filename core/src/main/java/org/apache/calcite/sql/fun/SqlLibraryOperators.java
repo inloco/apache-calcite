@@ -26,6 +26,7 @@ import org.apache.calcite.sql.SqlCallBinding;
 import org.apache.calcite.sql.SqlFunction;
 import org.apache.calcite.sql.SqlFunctionCategory;
 import org.apache.calcite.sql.SqlKind;
+import org.apache.calcite.sql.SqlOperandCountRange;
 import org.apache.calcite.sql.SqlOperator;
 import org.apache.calcite.sql.SqlOperatorBinding;
 import org.apache.calcite.sql.SqlOperatorTable;
@@ -36,6 +37,7 @@ import org.apache.calcite.sql.type.InferTypes;
 import org.apache.calcite.sql.type.OperandHandlers;
 import org.apache.calcite.sql.type.OperandTypes;
 import org.apache.calcite.sql.type.ReturnTypes;
+import org.apache.calcite.sql.type.SameOperandTypeChecker;
 import org.apache.calcite.sql.type.SqlOperandCountRanges;
 import org.apache.calcite.sql.type.SqlReturnTypeInference;
 import org.apache.calcite.sql.type.SqlTypeFamily;
@@ -62,6 +64,7 @@ import java.util.stream.IntStream;
 import static org.apache.calcite.sql.fun.SqlLibrary.ALL;
 import static org.apache.calcite.sql.fun.SqlLibrary.BIG_QUERY;
 import static org.apache.calcite.sql.fun.SqlLibrary.CALCITE;
+import static org.apache.calcite.sql.fun.SqlLibrary.CLICKHOUSE;
 import static org.apache.calcite.sql.fun.SqlLibrary.HIVE;
 import static org.apache.calcite.sql.fun.SqlLibrary.MSSQL;
 import static org.apache.calcite.sql.fun.SqlLibrary.MYSQL;
@@ -422,7 +425,7 @@ public abstract class SqlLibraryOperators {
           OperandTypes.STRING_SAME_SAME);
 
   /** The "ENDSWITH(value1, value2)" function (Snowflake). */
-  @LibraryOperator(libraries = {SNOWFLAKE, SPARK})
+  @LibraryOperator(libraries = {SNOWFLAKE, SPARK, CLICKHOUSE})
   public static final SqlFunction ENDSWITH = ENDS_WITH.withName("ENDSWITH");
 
   /** The "STARTS_WITH(value1, value2)" function (BigQuery, PostgreSQL). */
@@ -432,7 +435,7 @@ public abstract class SqlLibraryOperators {
           OperandTypes.STRING_SAME_SAME);
 
   /** The "STARTSWITH(value1, value2)" function (Snowflake). */
-  @LibraryOperator(libraries = {SNOWFLAKE, SPARK})
+  @LibraryOperator(libraries = {SNOWFLAKE, SPARK, CLICKHOUSE})
   public static final SqlFunction STARTSWITH = STARTS_WITH.withName("STARTSWITH");
 
   /** BigQuery's "SUBSTR(string, position [, substringLength ])" function. */
@@ -702,11 +705,10 @@ public abstract class SqlLibraryOperators {
   public static final SqlFunction REGEXP_SUBSTR = REGEXP_EXTRACT.withName("REGEXP_SUBSTR");
 
   /** The "REGEXP(value, regexp)" function, equivalent to {@link #RLIKE}. */
-  @LibraryOperator(libraries = {SPARK})
+  @LibraryOperator(libraries = {SPARK, HIVE})
   public static final SqlFunction REGEXP =
-      SqlBasicFunction.create("REGEXP", ReturnTypes.BOOLEAN_NULLABLE,
-          OperandTypes.STRING_STRING,
-          SqlFunctionCategory.STRING);
+      SqlBasicFunction.create("REGEXP", SqlKind.RLIKE, ReturnTypes.BOOLEAN_NULLABLE,
+          OperandTypes.STRING_STRING);
 
   /** The "REGEXP_LIKE(value, regexp)" function, equivalent to {@link #RLIKE}. */
   @LibraryOperator(libraries = {SPARK, MYSQL, POSTGRESQL, ORACLE})
@@ -1378,7 +1380,12 @@ public abstract class SqlLibraryOperators {
               ? ReturnTypes.LEAST_RESTRICTIVE.inferReturnType(opBinding)
               : opBinding.getTypeFactory().createUnknownType();
     }
-    requireNonNull(type, "inferred array element type");
+    if (type == null) {
+      throw opBinding.newError(
+          RESOURCE.cannotInferReturnType(
+              opBinding.getOperator().toString(),
+              opBinding.collectOperandTypes().toString()));
+    }
 
     // explicit cast elements to component type if they are not same
     SqlValidatorUtil.adjustTypeForArrayConstructor(type, opBinding);
@@ -1512,7 +1519,34 @@ public abstract class SqlLibraryOperators {
   public static final SqlFunction ARRAY_CONCAT =
       SqlBasicFunction.create(SqlKind.ARRAY_CONCAT,
           ReturnTypes.LEAST_RESTRICTIVE,
-          OperandTypes.AT_LEAST_ONE_SAME_VARIADIC);
+          new SameOperandTypeChecker(-1) {
+            @Override public boolean checkOperandTypes(
+                SqlCallBinding callBinding,
+                boolean throwOnFailure) {
+              boolean result = super.checkOperandTypes(callBinding, throwOnFailure);
+              if (!result) {
+                return false;
+              }
+              for (int i = 0; i < callBinding.getOperandCount(); i++) {
+                RelDataType operandType = callBinding.getOperandType(i);
+                if (operandType.getSqlTypeName() != SqlTypeName.ARRAY) {
+                  if (throwOnFailure) {
+                    throw callBinding.newValidationSignatureError();
+                  }
+                  return false;
+                }
+              }
+              return true;
+            }
+
+              @Override public SqlOperandCountRange getOperandCountRange() {
+                return SqlOperandCountRanges.from(1);
+              }
+
+              @Override public String getAllowedSignatures(SqlOperator op, String opName) {
+                return opName + "(...)";
+              }
+          });
 
   /** The "ARRAY_CONTAINS(array, element)" function. */
   @LibraryOperator(libraries = {SPARK})
@@ -1548,8 +1582,8 @@ public abstract class SqlLibraryOperators {
     requireNonNull(componentType, () -> "componentType of " + arrayType);
 
     // we don't need to do leastRestrictive on componentType and elementType,
-    // because in operand checker we limit the elementType must equals array component type.
-    // So we use componentType directly.
+    // because in operand checker we limit the elementType such that it equals the array component
+    // type. So we use componentType directly.
     RelDataType type =
         opBinding.getTypeFactory().leastRestrictive(
             ImmutableList.of(componentType, elementType2));
@@ -1559,7 +1593,7 @@ public abstract class SqlLibraryOperators {
     // position is large", it implies that in the result the element type is always nullable.
     type = opBinding.getTypeFactory().createTypeWithNullability(type, true);
     // make explicit CAST for array elements and inserted element to the biggest type
-    // if array component type not equals to inserted element type
+    // if array component type is not equal to the inserted element type
     if (!componentType.equalsSansFieldNamesAndNullability(elementType2)) {
       // For array_insert, 0 is the array arg and 2 is the inserted element
       SqlValidatorUtil.
@@ -2527,6 +2561,15 @@ public abstract class SqlLibraryOperators {
           OperandTypes.NUMERIC,
           SqlFunctionCategory.STRING);
 
+  /** The {@code HYPOT(numeric1, numeric2)} function; returns
+   * sqrt(numeric1^2 + numeric2^2) without intermediate overflow or underflow. */
+  @LibraryOperator(libraries = {SPARK, CLICKHOUSE})
+  public static final SqlFunction HYPOT =
+      SqlBasicFunction.create("HYPOT",
+          ReturnTypes.DOUBLE_NULLABLE,
+          OperandTypes.NUMERIC_NUMERIC,
+          SqlFunctionCategory.NUMERIC);
+
   @LibraryOperator(libraries = {BIG_QUERY, MYSQL, POSTGRESQL, SPARK, HIVE})
   public static final SqlFunction MD5 =
       SqlBasicFunction.create("MD5",
@@ -2740,4 +2783,21 @@ public abstract class SqlLibraryOperators {
   public static final SqlFunction RANDOM = SqlStdOperatorTable.RAND
       .withName("RANDOM")
       .withOperandTypeChecker(OperandTypes.NILADIC);
+
+  /**
+   * AGE function for PostgreSQL.
+   * Returns a human-readable VARCHAR describing the interval between
+   * one or two timestamps (for example,
+   * "3 years 11 mons 24 days 0 hours 0 mins 0.0 secs").
+   *
+   * @see <a href="https://www.postgresql.org/docs/current/functions-datetime.html">PostgreSQL AGE</a>
+   */
+  @LibraryOperator(libraries = {POSTGRESQL}, exceptLibraries = {REDSHIFT})
+  public static final SqlBasicFunction AGE =
+      SqlBasicFunction.create("AGE",
+          ReturnTypes.VARCHAR_NULLABLE,
+          OperandTypes.or(
+              OperandTypes.family(SqlTypeFamily.TIMESTAMP),
+              OperandTypes.family(SqlTypeFamily.TIMESTAMP, SqlTypeFamily.TIMESTAMP)),
+          SqlFunctionCategory.TIMEDATE);
 }

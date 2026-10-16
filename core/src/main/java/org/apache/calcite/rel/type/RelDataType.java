@@ -260,7 +260,8 @@ public interface RelDataType {
 
   /** Returns whether the field types are equal with each other by ignoring the
    * field names. If it is not a struct, just return the result of {@code
-   * #equals(Object)}. */
+   * #equals(Object)}. Note that for generic types (e.g., ARRAY),
+   * this is also the same as equals, even if type arguments are ROW types. */
   @API(since = "1.24", status = API.Status.INTERNAL)
   default boolean equalsSansFieldNames(@Nullable RelDataType that) {
     if (this == that) {
@@ -321,4 +322,26 @@ public interface RelDataType {
   default boolean isMeasure() {
     return getSqlTypeName() == SqlTypeName.MEASURE;
   }
+
+  /**
+   * Returns the digest of this type.
+   *
+   * @return digest of this type
+   */
+  RelDataTypeDigest getDigest();
+
+  /**
+   * Deep equality check for RelDataType digest.
+   *
+   * @return Whether the 2 RelDataTypes are equivalent or have the same digest.
+   * @see #deepHashCode()
+   */
+  boolean deepEquals(@Nullable Object obj);
+
+  /**
+   * Compute deep hash code for RelDataType digest.
+   *
+   * @see #deepEquals(Object)
+   */
+  int deepHashCode();
 }

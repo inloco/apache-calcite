@@ -27,6 +27,7 @@ import org.apache.calcite.plan.RelOptCluster;
 import org.apache.calcite.plan.RelOptPlanner;
 import org.apache.calcite.plan.RelOptPredicateList;
 import org.apache.calcite.plan.RelOptTable;
+import org.apache.calcite.plan.RelOptUtil;
 import org.apache.calcite.plan.RelTraitSet;
 import org.apache.calcite.plan.hep.HepPlanner;
 import org.apache.calcite.plan.hep.HepProgram;
@@ -42,6 +43,7 @@ import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.SingleRel;
 import org.apache.calcite.rel.core.Aggregate;
 import org.apache.calcite.rel.core.AggregateCall;
+import org.apache.calcite.rel.core.Calc;
 import org.apache.calcite.rel.core.Correlate;
 import org.apache.calcite.rel.core.Exchange;
 import org.apache.calcite.rel.core.Filter;
@@ -104,12 +106,14 @@ import org.apache.calcite.sql.SqlKind;
 import org.apache.calcite.sql.SqlOperator;
 import org.apache.calcite.sql.fun.SqlStdOperatorTable;
 import org.apache.calcite.sql.test.SqlTestFactory;
+import org.apache.calcite.sql.test.SqlValidatorTester;
 import org.apache.calcite.sql.type.OperandTypes;
 import org.apache.calcite.sql.type.ReturnTypes;
 import org.apache.calcite.sql.type.SqlTypeName;
 import org.apache.calcite.test.catalog.MockCatalogReaderSimple;
 import org.apache.calcite.tools.Frameworks;
 import org.apache.calcite.tools.RelBuilder;
+import org.apache.calcite.util.ArrowSet;
 import org.apache.calcite.util.Holder;
 import org.apache.calcite.util.ImmutableBitSet;
 import org.apache.calcite.util.ImmutableIntList;
@@ -155,6 +159,7 @@ import static org.hamcrest.CoreMatchers.is;
 import static org.hamcrest.CoreMatchers.not;
 import static org.hamcrest.CoreMatchers.notNullValue;
 import static org.hamcrest.CoreMatchers.nullValue;
+import static org.hamcrest.CoreMatchers.sameInstance;
 import static org.hamcrest.CoreMatchers.startsWith;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.closeTo;
@@ -292,6 +297,775 @@ public class RelMetadataTest {
         .assertPercentageOriginalRows(
             isAlmost(((EMP_SIZE * DEFAULT_EQUAL_SELECTIVITY) + DEPT_SIZE)
                 / (DEPT_SIZE + EMP_SIZE)));
+  }
+
+  // ----------------------------------------------------------------------
+  // Tests for functional dependency metadata in RelMdFunctionalDependency
+  // ----------------------------------------------------------------------
+
+  @Test void testFunctionalDependencyProject() {
+    final String sql = "select empno, deptno, deptno + 1 as deptNoPlus1, rand() as rand"
+        + " from emp where deptno < 20";
+
+    final RelNode relNode = sql(sql).toRel();
+
+    // Plan is:
+    assertThat(
+        Util.toLinux(RelOptUtil.toString(relNode)),
+        is(""
+            + "LogicalProject(EMPNO=[$0], DEPTNO=[$7], DEPTNOPLUS1=[+($7, 1)], RAND=[RAND()])\n"
+            + "  LogicalFilter(condition=[<($7, 20)])\n"
+            + "    LogicalTableScan(table=[[CATALOG, SALES, EMP]])\n"));
+
+    final RelMetadataQuery mq = relNode.getCluster().getMetadataQuery();
+
+    int empNo = 0;       // empno - primary key
+    int deptNo = 1;      // deptno
+    int deptNoPlus1 = 2; // deptno + 1
+    int rand = 3;        // rand()
+
+    // deptno should determine deptno + 1 (expression is deterministic)
+    assertThat(mq.determines(relNode, deptNo, deptNoPlus1), is(Boolean.TRUE));
+
+    // deptno should NOT determine empno (deptno is not unique)
+    assertThat(mq.determines(relNode, deptNo, empNo), is(Boolean.FALSE));
+
+    // empno should determine deptno + 1 (primary key determines everything)
+    assertThat(mq.determines(relNode, empNo, deptNoPlus1), is(Boolean.TRUE));
+
+    // deptno + 1 should NOT determine empno (deptno + 1 is not unique)
+    assertThat(mq.determines(relNode, deptNoPlus1, empNo), is(Boolean.FALSE));
+
+    // rand() should not determine anything (non-deterministic)
+    assertThat(mq.determines(relNode, rand, empNo), is(Boolean.FALSE));
+
+    // Nothing should determine rand() (non-deterministic)
+    assertThat(mq.determines(relNode, empNo, rand), is(Boolean.FALSE));
+  }
+
+  @Test void testFunctionalDependencyAggregate() {
+    final String sql = "select deptno, count(*) as \"count\", sum(sal) as sumSal"
+        + " from emp group by deptno";
+
+    final RelNode relNode = sql(sql).toRel();
+
+    assertThat(
+        Util.toLinux(RelOptUtil.toString(relNode)),
+        is(""
+            + "LogicalAggregate(group=[{0}], count=[COUNT()], SUMSAL=[SUM($1)])\n"
+            + "  LogicalProject(DEPTNO=[$7], SAL=[$5])\n"
+            + "    LogicalTableScan(table=[[CATALOG, SALES, EMP]])\n"));
+
+    final RelMetadataQuery mq = relNode.getCluster().getMetadataQuery();
+
+    int deptNo = 0;    // deptno (group by column)
+    int count = 1;     // count(*)
+    int sumSal = 2;    // sum(sal)
+
+    // Group by column should determine aggregate columns
+    assertThat(mq.determines(relNode, deptNo, count), is(Boolean.TRUE));
+    assertThat(mq.determines(relNode, deptNo, sumSal), is(Boolean.TRUE));
+
+    // Aggregate columns should not determine group by column
+    assertThat(mq.determines(relNode, count, deptNo), is(Boolean.FALSE));
+    assertThat(mq.determines(relNode, sumSal, deptNo), is(Boolean.FALSE));
+
+    // Aggregate columns should not determine each other
+    assertThat(mq.determines(relNode, count, sumSal), is(Boolean.FALSE));
+    assertThat(mq.determines(relNode, sumSal, count), is(Boolean.FALSE));
+  }
+
+  @Test void testFunctionalDependencyWithIdenticalExpressions() {
+    final String sql = "select deptno, deptno as deptno2, deptno + 1 as deptno3 from emp";
+
+    final RelNode relNode = sql(sql).toRel();
+
+    assertThat(
+        Util.toLinux(RelOptUtil.toString(relNode)),
+        is(""
+            + "LogicalProject(DEPTNO=[$7], DEPTNO2=[$7], DEPTNO3=[+($7, 1)])\n"
+            + "  LogicalTableScan(table=[[CATALOG, SALES, EMP]])\n"));
+
+    final RelMetadataQuery mq = relNode.getCluster().getMetadataQuery();
+
+    int deptNo = 0;     // deptno
+    int deptNo2 = 1;    // deptno (identical)
+    int deptNo3 = 2;    // deptno + 1
+
+    // Identical expressions should determine each other
+    assertThat(mq.determines(relNode, deptNo, deptNo2), is(Boolean.TRUE));
+    assertThat(mq.determines(relNode, deptNo2, deptNo), is(Boolean.TRUE));
+
+    // deptno should determine deptno + 1 (deterministic expression)
+    assertThat(mq.determines(relNode, deptNo, deptNo3), is(Boolean.TRUE));
+    assertThat(mq.determines(relNode, deptNo2, deptNo3), is(Boolean.TRUE));
+  }
+
+  @Test void testFunctionalDependencyJoin() {
+    final String sql = "select e.empno, e.ename, e.deptno, d.name"
+        + " from emp e join dept d on e.deptno = d.deptno";
+
+    final RelNode relNode = sql(sql).toRel();
+
+    assertThat(
+        Util.toLinux(RelOptUtil.toString(relNode)),
+        is(""
+            + "LogicalProject(EMPNO=[$0], ENAME=[$1], DEPTNO=[$7], NAME=[$10])\n"
+            + "  LogicalJoin(condition=[=($7, $9)], joinType=[inner])\n"
+            + "    LogicalTableScan(table=[[CATALOG, SALES, EMP]])\n"
+            + "    LogicalTableScan(table=[[CATALOG, SALES, DEPT]])\n"));
+
+    final RelMetadataQuery mq = relNode.getCluster().getMetadataQuery();
+
+    int empNo = 0;    // e.empno
+    int ename = 1;    // e.ename
+    int deptno = 2;   // e.deptno
+    int dname = 3;    // d.name
+
+    // Left side functional dependencies should be preserved
+    // empno determines ename and deptno (primary key from emp table)
+    assertThat(mq.determines(relNode, empNo, ename), is(Boolean.TRUE));
+    assertThat(mq.determines(relNode, empNo, deptno), is(Boolean.TRUE));
+
+    // Right side functional dependencies should be preserved with shifted indices
+    // deptno determines dname (primary key from dept table)
+    assertThat(mq.determines(relNode, deptno, dname), is(Boolean.TRUE));
+
+    // Cross-table dependencies through join condition
+    // empno should determine dname (through deptno)
+    assertThat(mq.determines(relNode, empNo, dname), is(Boolean.TRUE));
+
+    // Reverse dependencies should not hold
+    assertThat(mq.determines(relNode, ename, empNo), is(Boolean.FALSE));
+    assertThat(mq.determines(relNode, dname, empNo), is(Boolean.FALSE));
+  }
+
+  @Test void testFunctionalDependencyFilter() {
+    final String sql = "select empno, ename, sal from emp where sal > 1000";
+
+    final RelNode relNode = sql(sql).toRel();
+
+    assertThat(
+        Util.toLinux(RelOptUtil.toString(relNode)),
+        is(""
+            + "LogicalProject(EMPNO=[$0], ENAME=[$1], SAL=[$5])\n"
+            + "  LogicalFilter(condition=[>($5, 1000)])\n"
+            + "    LogicalTableScan(table=[[CATALOG, SALES, EMP]])\n"));
+
+    final RelMetadataQuery mq = relNode.getCluster().getMetadataQuery();
+
+    int empNo = 0;  // empno
+    int ename = 1;  // ename
+    int sal = 2;    // sal
+
+    // Filter should preserve functional dependencies from base table
+    // empno should still determine ename and sal
+    assertThat(mq.determines(relNode, empNo, ename), is(Boolean.TRUE));
+    assertThat(mq.determines(relNode, empNo, sal), is(Boolean.TRUE));
+
+    // sal should not determine empno
+    assertThat(mq.determines(relNode, sal, empNo), is(Boolean.FALSE));
+  }
+
+  @Test void testFunctionalDependencyComplexExpressions() {
+    final String sql = "select empno, sal, sal * 1.1 as raised_sal, "
+        + "case when sal > 2000 then 'high' else 'low' end as sal_category"
+        + " from emp";
+
+    final RelNode relNode = sql(sql).toRel();
+
+    assertThat(
+        Util.toLinux(RelOptUtil.toString(relNode)),
+        is(""
+            + "LogicalProject(EMPNO=[$0], SAL=[$5], RAISED_SAL=[*($5, 1.1:DECIMAL(2, 1))],"
+            + " SAL_CATEGORY=[CASE(>($5, 2000), 'high', 'low ')])\n"
+            + "  LogicalTableScan(table=[[CATALOG, SALES, EMP]])\n"));
+
+    final RelMetadataQuery mq = relNode.getCluster().getMetadataQuery();
+
+    int empNo = 0;        // empno
+    int sal = 1;          // sal
+    int raisedSal = 2;    // sal * 1.1
+    int salCategory = 3;  // case expression
+
+    // empno determines all other columns (primary key)
+    assertThat(mq.determines(relNode, empNo, sal), is(Boolean.TRUE));
+    assertThat(mq.determines(relNode, empNo, raisedSal), is(Boolean.TRUE));
+    assertThat(mq.determines(relNode, empNo, salCategory), is(Boolean.TRUE));
+
+    // sal determines computed columns based on sal
+    assertThat(mq.determines(relNode, sal, raisedSal), is(Boolean.TRUE));
+    assertThat(mq.determines(relNode, sal, salCategory), is(Boolean.TRUE));
+  }
+
+  @Test void testFunctionalDependencyUnion() {
+    final String sql = "select empno, deptno from emp where deptno = 10"
+        + " union all "
+        + " select empno, deptno from emp where deptno = 20";
+
+    final RelNode relNode = sql(sql).toRel();
+
+    assertThat(
+        Util.toLinux(RelOptUtil.toString(relNode)),
+        is(""
+            + "LogicalUnion(all=[true])\n"
+            + "  LogicalProject(EMPNO=[$0], DEPTNO=[$7])\n"
+            + "    LogicalFilter(condition=[=($7, 10)])\n"
+            + "      LogicalTableScan(table=[[CATALOG, SALES, EMP]])\n"
+            + "  LogicalProject(EMPNO=[$0], DEPTNO=[$7])\n"
+            + "    LogicalFilter(condition=[=($7, 20)])\n"
+            + "      LogicalTableScan(table=[[CATALOG, SALES, EMP]])\n"));
+
+    final RelMetadataQuery mq = relNode.getCluster().getMetadataQuery();
+
+    int empNo = 0;   // empno
+    int deptno = 1;  // deptno
+
+    // Union handling is not yet fully implemented
+    // For now, expect this might not work
+    // assertThat(mq.determines(relNode, empNo, deptno), is(Boolean.TRUE));
+
+    // deptno should not determine empno
+    assertThat(mq.determines(relNode, deptno, empNo), is(Boolean.FALSE));
+  }
+
+  @Test void testFunctionalDependencyMultipleKeys() {
+    final String sql = "select empno, deptno, empno * 100 + deptno as composite from emp";
+
+    final RelNode relNode = sql(sql).toRel();
+
+    assertThat(
+        Util.toLinux(RelOptUtil.toString(relNode)),
+        is(""
+            + "LogicalProject(EMPNO=[$0], DEPTNO=[$7], COMPOSITE=[+(*($0, 100), $7)])\n"
+            + "  LogicalTableScan(table=[[CATALOG, SALES, EMP]])\n"));
+
+    final RelMetadataQuery mq = relNode.getCluster().getMetadataQuery();
+
+    int empNo = 0;      // empno
+    int deptno = 1;     // deptno
+    int composite = 2;  // empno * 100 + deptno
+
+    // empno determines all
+    assertThat(mq.determines(relNode, empNo, deptno), is(Boolean.TRUE));
+    assertThat(mq.determines(relNode, empNo, composite), is(Boolean.TRUE));
+
+    // Multiple keys handling is not yet fully implemented
+  }
+
+  @Test void testFunctionalDependencyConstants() {
+    final String sql = "select empno, 100 as constant_col, deptno"
+        + " from emp";
+
+    final RelNode relNode = sql(sql).toRel();
+
+    assertThat(
+        Util.toLinux(RelOptUtil.toString(relNode)),
+        is(""
+            + "LogicalProject(EMPNO=[$0], CONSTANT_COL=[100], DEPTNO=[$7])\n"
+            + "  LogicalTableScan(table=[[CATALOG, SALES, EMP]])\n"));
+
+    final RelMetadataQuery mq = relNode.getCluster().getMetadataQuery();
+
+    int empNo = 0;       // empno
+    int constant = 1;    // 100 (constant)
+    int deptno = 2;      // deptno
+
+    // Constants should be functionally dependent on everything
+    assertThat(mq.determines(relNode, empNo, constant), is(Boolean.TRUE));
+
+    // Original dependencies should be preserved
+    assertThat(mq.determines(relNode, empNo, deptno), is(Boolean.TRUE));
+
+    // Everything determines constants
+    assertThat(mq.determines(relNode, deptno, constant), is(Boolean.TRUE));
+  }
+
+  @Test void testFunctionalDependencyNonDeterministicFunctions() {
+    final String sql = "select empno, rand() as random1, rand() as random2 from emp";
+
+    final RelNode relNode = sql(sql).toRel();
+
+    assertThat(
+        Util.toLinux(RelOptUtil.toString(relNode)),
+        is(""
+            + "LogicalProject(EMPNO=[$0], RANDOM1=[RAND()], RANDOM2=[RAND()])\n"
+            + "  LogicalTableScan(table=[[CATALOG, SALES, EMP]])\n"));
+
+    final RelMetadataQuery mq = relNode.getCluster().getMetadataQuery();
+
+    int empNo = 0;    // empno
+    int random1 = 1;  // random1
+    int random2 = 2;  // random2
+
+    // Basic functional dependencies should still work
+    assertThat(mq.determines(relNode, empNo, empNo), is(Boolean.TRUE));
+
+    // Non-deterministic functions should not determine anything
+    assertThat(mq.determines(relNode, random1, empNo), is(Boolean.FALSE));
+    assertThat(mq.determines(relNode, random1, random2), is(Boolean.FALSE));
+    assertThat(mq.determines(relNode, random2, empNo), is(Boolean.FALSE));
+  }
+
+  @Test void testFunctionalDependencyInnerJoin() {
+    final String sql = "SELECT e.empno, e.deptno, d.name\n"
+        + "FROM emp e\n"
+        + "JOIN dept d ON e.deptno = d.deptno";
+
+    final RelNode relNode = sql(sql).toRel();
+
+    assertThat(
+        Util.toLinux(RelOptUtil.toString(relNode)),
+        is(""
+            + "LogicalProject(EMPNO=[$0], DEPTNO=[$7], NAME=[$10])\n"
+            + "  LogicalJoin(condition=[=($7, $9)], joinType=[inner])\n"
+            + "    LogicalTableScan(table=[[CATALOG, SALES, EMP]])\n"
+            + "    LogicalTableScan(table=[[CATALOG, SALES, DEPT]])\n"));
+
+    final RelMetadataQuery mq = relNode.getCluster().getMetadataQuery();
+
+    int empNo = 0;     // e.empno
+    int deptno = 1;    // e.deptno
+    int dname = 2;     // d.name
+
+    assertThat(mq.determines(relNode, empNo, deptno), is(Boolean.TRUE));
+    assertThat(mq.determines(relNode, empNo, dname), is(Boolean.TRUE));
+  }
+
+  @Test void testFunctionalDependencyLeftJoin() {
+    final String sql = "SELECT e.empno, e.deptno, d.name\n"
+        + "FROM emp e\n"
+        + "LEFT JOIN dept d ON e.deptno = d.deptno";
+
+    final RelNode relNode = sql(sql).toRel();
+
+    assertThat(
+        Util.toLinux(RelOptUtil.toString(relNode)),
+        is(""
+            + "LogicalProject(EMPNO=[$0], DEPTNO=[$7], NAME=[$10])\n"
+            + "  LogicalJoin(condition=[=($7, $9)], joinType=[left])\n"
+            + "    LogicalTableScan(table=[[CATALOG, SALES, EMP]])\n"
+            + "    LogicalTableScan(table=[[CATALOG, SALES, DEPT]])\n"));
+
+    final RelMetadataQuery mq = relNode.getCluster().getMetadataQuery();
+
+    int empNo = 0;     // e.empno
+    int deptno = 1;    // e.deptno
+    int dname = 2;     // d.name
+
+    assertThat(mq.determines(relNode, empNo, deptno), is(Boolean.TRUE));
+    assertThat(mq.determines(relNode, empNo, dname), is(Boolean.TRUE));
+  }
+
+  @Test void testFunctionalDependencyRightJoin() {
+    final String sql = "SELECT e.empno, e.deptno, d.name\n"
+        + "FROM dept d\n"
+        + "RIGHT JOIN emp e ON e.deptno = d.deptno";
+
+    final RelNode relNode = sql(sql).toRel();
+
+    assertThat(
+        Util.toLinux(RelOptUtil.toString(relNode)),
+        is(""
+            + "LogicalProject(EMPNO=[$2], DEPTNO=[$9], NAME=[$1])\n"
+            + "  LogicalJoin(condition=[=($9, $0)], joinType=[right])\n"
+            + "    LogicalTableScan(table=[[CATALOG, SALES, DEPT]])\n"
+            + "    LogicalTableScan(table=[[CATALOG, SALES, EMP]])\n"));
+
+    final RelMetadataQuery mq = relNode.getCluster().getMetadataQuery();
+
+    int empNo = 0;     // e.empno
+    int deptno = 1;    // e.deptno
+    int dname = 2;     // d.name
+
+    assertThat(mq.determines(relNode, empNo, deptno), is(Boolean.TRUE));
+    assertThat(mq.determines(relNode, empNo, dname), is(Boolean.TRUE));
+  }
+
+  @Test void testFunctionalDependencyFullOuterJoin() {
+    final String sql = "SELECT e.empno, e.deptno, d.name\n"
+        + "FROM emp e\n"
+        + "FULL JOIN dept d ON e.deptno = d.deptno";
+
+    final RelNode relNode = sql(sql).toRel();
+
+    assertThat(
+        Util.toLinux(RelOptUtil.toString(relNode)),
+        is(""
+            + "LogicalProject(EMPNO=[$0], DEPTNO=[$7], NAME=[$10])\n"
+            + "  LogicalJoin(condition=[=($7, $9)], joinType=[full])\n"
+            + "    LogicalTableScan(table=[[CATALOG, SALES, EMP]])\n"
+            + "    LogicalTableScan(table=[[CATALOG, SALES, DEPT]])\n"));
+
+    final RelMetadataQuery mq = relNode.getCluster().getMetadataQuery();
+
+    int empNo = 0;     // e.empno
+    int deptno = 1;    // e.deptno
+    int dname = 2;     // d.name
+
+    // Left side dependencies should not be preserved
+    assertThat(mq.determines(relNode, empNo, deptno), is(Boolean.FALSE));
+
+    // Cross-join dependencies might not hold due to nulls from outer join
+    assertThat(mq.determines(relNode, empNo, dname), is(Boolean.FALSE));
+  }
+
+  @Test void testFunctionalDependencySort() {
+    final String sql = "select empno, ename, deptno, sal"
+        + " from emp order by empno, deptno";
+
+    final RelNode relNode = sql(sql).toRel();
+
+    assertThat(
+        Util.toLinux(RelOptUtil.toString(relNode)),
+        is(""
+            + "LogicalSort(sort0=[$0], sort1=[$2], dir0=[ASC], dir1=[ASC])\n"
+            + "  LogicalProject(EMPNO=[$0], ENAME=[$1], DEPTNO=[$7], SAL=[$5])\n"
+            + "    LogicalTableScan(table=[[CATALOG, SALES, EMP]])\n"));
+
+    final RelMetadataQuery mq = relNode.getCluster().getMetadataQuery();
+
+    int empNo = 0;   // empno
+    int ename = 1;   // ename
+    int deptno = 2;  // deptno
+    int sal = 3;     // sal
+
+    // empno is primary key, so it should determine all other columns
+    assertThat(mq.determines(relNode, empNo, ename), is(Boolean.TRUE));
+    assertThat(mq.determines(relNode, empNo, deptno), is(Boolean.TRUE));
+    assertThat(mq.determines(relNode, empNo, sal), is(Boolean.TRUE));
+
+    // Non-key columns should not determine key column
+    assertThat(mq.determines(relNode, ename, empNo), is(Boolean.FALSE));
+    assertThat(mq.determines(relNode, deptno, empNo), is(Boolean.FALSE));
+    assertThat(mq.determines(relNode, sal, empNo), is(Boolean.FALSE));
+
+    // Test candidate keys functionality for sort keys
+    ImmutableBitSet sortKeys = ImmutableBitSet.of(empNo, deptno);
+    Set<ImmutableBitSet> candidateKeys = mq.determinants(relNode, sortKeys);
+
+    // Should find that empno alone is a candidate key within the sort keys
+    assertThat(candidateKeys.isEmpty(), is(Boolean.FALSE));
+    assertThat(candidateKeys.contains(ImmutableBitSet.of(empNo)), is(Boolean.TRUE));
+  }
+
+  @Test void testFunctionalDependencySortDuplicateKeys() {
+    final String sql = "select * from (select deptno as d1, deptno as d2 from emp) as t1\n"
+        + " join emp t2 on t1.d1 = t2.deptno order by t1.d1, t1.d2, t1.d1 DESC NULLS FIRST";
+
+    final RelNode relNode = sql(sql).toRel();
+
+    assertThat(
+        Util.toLinux(RelOptUtil.toString(relNode)),
+        is(""
+            + "LogicalSort(sort0=[$0], sort1=[$1], dir0=[ASC], dir1=[ASC])\n"
+            + "  LogicalProject(D1=[$0], D2=[$1], EMPNO=[$2], ENAME=[$3], JOB=[$4], MGR=[$5],"
+            + " HIREDATE=[$6], SAL=[$7], COMM=[$8], DEPTNO=[$9], SLACKER=[$10])\n"
+            + "    LogicalJoin(condition=[=($0, $9)], joinType=[inner])\n"
+            + "      LogicalProject(D1=[$7], D2=[$7])\n"
+            + "        LogicalTableScan(table=[[CATALOG, SALES, EMP]])\n"
+            + "      LogicalTableScan(table=[[CATALOG, SALES, EMP]])\n"));
+
+    final RelMetadataQuery mq = relNode.getCluster().getMetadataQuery();
+
+    Sort sort = (Sort) relNode;
+    ImmutableIntList keys = sort.getCollation().getKeys();
+
+    int d1 = keys.get(0);      // t1.d1
+    int d2 = keys.get(1);      // t1.d2
+
+    // Identical expressions should determine each other
+    assertThat(mq.determines(relNode, d1, d2), is(Boolean.TRUE));
+    assertThat(mq.determines(relNode, d2, d1), is(Boolean.TRUE));
+
+    // Test candidate keys for the sort keys (d1, d2)
+    ImmutableBitSet sortKeys = ImmutableBitSet.of(d1, d2);
+    Set<ImmutableBitSet> candidateKeys = mq.determinants(relNode, sortKeys);
+
+    // Either {d1} or {d2} should be a candidate key since they are identical
+    assertThat(candidateKeys.contains(ImmutableBitSet.of(d1)), is(Boolean.TRUE));
+    assertThat(candidateKeys.contains(ImmutableBitSet.of(d2)), is(Boolean.TRUE));
+  }
+
+  @Test void testFunctionalDependencyFilterEqualityCondition() {
+    final String sql = "SELECT e1.empno, e1.sal, e2.mgr, e2.deptno\n"
+        + "FROM emp e1\n"
+        + "JOIN emp e2\n"
+        + "ON e2.mgr IS NOT DISTINCT FROM e2.deptno\n"
+        + "WHERE e1.empno = e1.sal";
+
+    final RelNode relNode = sql(sql).toRel();
+
+    assertThat(
+        Util.toLinux(RelOptUtil.toString(relNode)),
+        is(""
+            + "LogicalProject(EMPNO=[$0], SAL=[$5], MGR=[$12], DEPTNO=[$16])\n"
+            + "  LogicalFilter(condition=[=($0, $5)])\n"
+            + "    LogicalJoin(condition=[IS NOT DISTINCT FROM($12, $16)], joinType=[inner])\n"
+            + "      LogicalTableScan(table=[[CATALOG, SALES, EMP]])\n"
+            + "      LogicalTableScan(table=[[CATALOG, SALES, EMP]])\n"));
+
+    final RelMetadataQuery mq = relNode.getCluster().getMetadataQuery();
+
+    int empNo = 0;
+    int sal = 1;
+    int mgr = 2;
+    int deptno = 3;
+
+    // empno = sal should infer empno <-> sal
+    assertThat(mq.determines(relNode, empNo, sal), is(Boolean.TRUE));
+    assertThat(mq.determines(relNode, sal, empNo), is(Boolean.TRUE));
+    // mgr IS NOT DISTINCT FROM deptno should infer mgr <-> deptno
+    assertThat(mq.determines(relNode, mgr, deptno), is(Boolean.TRUE));
+    assertThat(mq.determines(relNode, deptno, mgr), is(Boolean.TRUE));
+  }
+
+  @Test void testFunctionalDependencyDoublePK() {
+    // double_pk keys is {0}, {0, 1}
+    final String sql = "select id1, id2, sum(age) as z"
+        + " from double_pk group by id1, id2";
+
+    final RelNode relNode = sql(sql).toRel();
+    assertThat(
+        Util.toLinux(RelOptUtil.toString(relNode)),
+        is(""
+            + "LogicalAggregate(group=[{0, 1}], Z=[SUM($2)])\n"
+            + "  LogicalProject(ID1=[$0], ID2=[$1], AGE=[$3])\n"
+            + "    LogicalTableScan(table=[[CATALOG, SALES, DOUBLE_PK]])\n"));
+
+    final RelMetadataQuery mq = relNode.getCluster().getMetadataQuery();
+    Aggregate aggregate = (Aggregate) relNode;
+    int id1 = 0; // id1 (primary key part)
+    int id2 = 1; // id2 (primary key part)
+    int z = 2;   // sum(age)
+
+    assertThat(mq.determines(aggregate, id2, id1), is(Boolean.FALSE));
+    assertThat(mq.determines(aggregate, id1, id2), is(Boolean.TRUE));
+    assertThat(mq.determines(aggregate, z, id1), is(Boolean.FALSE));
+    assertThat(mq.determines(aggregate, z, id2), is(Boolean.FALSE));
+  }
+
+  @Test void testFunctionDependencyCalc() {
+    final String sql = "SELECT deptno, sal1Sum, sal2Sum\n"
+        + "FROM (\n"
+        + " SELECT deptno,"
+        + "    SUM(sal1) AS sal1Sum,"
+        + "    SUM(sal2) AS sal2Sum,"
+        + "    job\n"
+        + " FROM (\n"
+        + "  SELECT deptno,"
+        + "    sal AS sal1,"
+        + "    sal AS sal2,"
+        + "    job\n"
+        + "  FROM emp\n"
+        + " ) t\n"
+        + " GROUP BY deptno, job\n"
+        + ") t2\n"
+        + "ORDER BY sal1Sum, job, sal2Sum + sal1Sum + 1";
+
+    final RelNode relNode = sql(sql).toRel();
+    final HepProgram program = new HepProgramBuilder()
+        .addRuleInstance(CoreRules.PROJECT_TO_CALC).build();
+    final HepPlanner planner = new HepPlanner(program);
+    planner.setRoot(relNode);
+    final RelNode plannedNode = planner.findBestExp();
+    assertThat(
+        Util.toLinux(RelOptUtil.toString(plannedNode)),
+        is(""
+            + "LogicalSort(sort0=[$1], sort1=[$3], sort2=[$4], dir0=[ASC], dir1=[ASC],"
+            + " dir2=[ASC])\n"
+            + "  LogicalCalc(expr#0..3=[{inputs}], expr#4=[+($t3, $t2)], expr#5=[1],"
+            + " expr#6=[+($t4, $t5)], DEPTNO=[$t0], SAL1SUM=[$t2], SAL2SUM=[$t3],"
+            + " JOB=[$t1], EXPR$4=[$t6])\n"
+            + "    LogicalAggregate(group=[{0, 1}], SAL1SUM=[SUM($2)], SAL2SUM=[SUM($3)])\n"
+            + "      LogicalCalc(expr#0..8=[{inputs}], DEPTNO=[$t7], JOB=[$t2], SAL1=[$t5],"
+            + " SAL2=[$t5])\n"
+            + "        LogicalTableScan(table=[[CATALOG, SALES, EMP]])\n"));
+
+    final RelMetadataQuery mq = plannedNode.getCluster().getMetadataQuery();
+
+    // Check Sort
+    final Sort sort = (Sort) plannedNode;
+    List<RelFieldCollation> collations = sort.getCollation().getFieldCollations();
+    int sal1Sum = collations.get(0).getFieldIndex();
+    int job = collations.get(1).getFieldIndex();
+    int sal2SumPlusSal1SumPlus1 = collations.get(2).getFieldIndex();
+
+    assertThat(mq.determines(sort, sal1Sum, sal1Sum), is(Boolean.TRUE));
+    assertThat(mq.determines(sort, job, sal1Sum), is(Boolean.FALSE));
+    assertThat(mq.determines(sort, sal2SumPlusSal1SumPlus1, sal1Sum), is(Boolean.FALSE));
+    assertThat(mq.determines(sort, sal1Sum, sal2SumPlusSal1SumPlus1), is(Boolean.FALSE));
+    assertThat(mq.determines(sort, sal2SumPlusSal1SumPlus1, sal2SumPlusSal1SumPlus1),
+        is(Boolean.TRUE));
+    assertThat(mq.determines(sort, sal2SumPlusSal1SumPlus1, job), is(Boolean.FALSE));
+
+    // Check Aggregate
+    Aggregate aggregate = (Aggregate) sort.getInput().getInput(0);
+    int deptNoGroupByKey = 0;
+    int jobGroupByKey = 1;
+    int sal1SumAggCall = 2;
+    int sal2SumAggCall = 3;
+
+    assertThat(mq.determines(aggregate, jobGroupByKey, deptNoGroupByKey), is(Boolean.FALSE));
+    assertThat(
+        mq.determinesSet(aggregate, ImmutableBitSet.of(deptNoGroupByKey, jobGroupByKey),
+        ImmutableBitSet.of(sal1SumAggCall)), is(Boolean.TRUE));
+    assertThat(
+        mq.determinesSet(aggregate, ImmutableBitSet.of(deptNoGroupByKey, jobGroupByKey),
+        ImmutableBitSet.of(sal2SumAggCall)), is(Boolean.TRUE));
+  }
+
+  /** Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-7219">[CALCITE-7219]
+   * Enhance functional dependency computation performance
+   * using the existing caching mechanisms</a>. */
+  @Test void testFunctionalDependencyCaching() {
+    final String sql = "select empno, ename from emp";
+    final RelNode relNode = sql(sql).toRel();
+
+    final RelMetadataQuery mq = relNode.getCluster().getMetadataQuery();
+
+    ArrowSet fd1 = mq.getFDs(relNode);
+    ArrowSet fd2 = mq.getFDs(relNode);
+
+    assertThat(mq.determines(relNode, 0, 1), is(Boolean.TRUE));
+    assertThat(fd2, sameInstance(fd1));
+  }
+
+  // ----------------------------------------------------------------------
+  // Tests for InputFieldsUsed metadata in RelMdInputFieldsUsed
+  // ----------------------------------------------------------------------
+
+  @Test void testInputFieldsUsedSemiJoin() {
+    final RelBuilder relBuilder = RelBuilderTest.createBuilder();
+    relBuilder.scan("EMP");
+    relBuilder.scan("DEPT");
+    relBuilder.semiJoin(
+        relBuilder.equals(relBuilder.field(2, 0, "DEPTNO"),
+            relBuilder.field(2, 1, "DEPTNO")));
+    final RelNode rel = relBuilder.build();
+    assertThat(Util.toLinux(RelOptUtil.toString(rel)),
+        is(""
+            + "LogicalJoin(condition=[=($7, $8)], joinType=[semi])\n"
+            + "  LogicalTableScan(table=[[scott, EMP]])\n"
+            + "  LogicalTableScan(table=[[scott, DEPT]])\n"));
+
+    final RelMetadataQuery mq = rel.getCluster().getMetadataQuery();
+    final ImmutableBitSet inputFields = mq.getInputFieldsUsed(rel);
+
+    // For SEMI join expect left input fields to be all columns of left input
+    assertThat(inputFields, equalTo(ImmutableBitSet.range(8)));
+  }
+
+  @Test void testInputFieldsUsedJoin() {
+    final RelBuilder relBuilder = RelBuilderTest.createBuilder();
+    final RelNode rel = relBuilder
+        .scan("EMP")
+        .project(relBuilder.field(0), relBuilder.field(7))
+        .scan("DEPT")
+        .project(relBuilder.field(0),  relBuilder.field(1))
+        .join(JoinRelType.INNER,
+            relBuilder.equals(relBuilder.field(2, 0, "DEPTNO"),
+                relBuilder.field(2, 1, "DEPTNO")))
+        .build();
+
+    assertThat(Util.toLinux(RelOptUtil.toString(rel)),
+        is("LogicalJoin(condition=[=($1, $2)], joinType=[inner])\n"
+            + "  LogicalProject(EMPNO=[$0], DEPTNO=[$7])\n"
+            + "    LogicalTableScan(table=[[scott, EMP]])\n"
+            + "  LogicalProject(DEPTNO=[$0], DNAME=[$1])\n"
+            + "    LogicalTableScan(table=[[scott, DEPT]])\n"));
+
+    final RelMetadataQuery mq = rel.getCluster().getMetadataQuery();
+    final ImmutableBitSet inputFields = mq.getInputFieldsUsed(rel);
+
+    // For normal join expect all columns of both inputs to be used.
+    assertThat(inputFields, equalTo(ImmutableBitSet.range(4)));
+  }
+
+  @Test void testInputFieldsUsedUnion() {
+    final String sql = "select deptno from dept union all select deptno from emp";
+    final RelNode rel = sql(sql).toRel();
+    assertThat(Util.toLinux(RelOptUtil.toString(rel)),
+        is(""
+            + "LogicalUnion(all=[true])\n"
+            + "  LogicalProject(DEPTNO=[$0])\n"
+            + "    LogicalTableScan(table=[[CATALOG, SALES, DEPT]])\n"
+            + "  LogicalProject(DEPTNO=[$7])\n"
+            + "    LogicalTableScan(table=[[CATALOG, SALES, EMP]])\n"));
+
+    final RelMetadataQuery mq = rel.getCluster().getMetadataQuery();
+    final ImmutableBitSet inputFields = mq.getInputFieldsUsed(rel);
+
+    // Expected result columns: [0, 1]
+    // this representing the sole field from input 0 and the sole field from input 1.
+    assertThat(inputFields, equalTo(ImmutableBitSet.of(0, 1)));
+  }
+
+  @Test void testInputFieldsUsedProject() {
+    final String sql = "select empno, job from emp";
+    final RelNode rel = sql(sql).toRel();
+    assertThat(Util.toLinux(RelOptUtil.toString(rel)),
+        is(""
+            + "LogicalProject(EMPNO=[$0], JOB=[$2])\n"
+            + "  LogicalTableScan(table=[[CATALOG, SALES, EMP]])\n"));
+
+    final RelMetadataQuery mq = rel.getCluster().getMetadataQuery();
+    final ImmutableBitSet inputFields = mq.getInputFieldsUsed(rel);
+
+    assertThat(inputFields, equalTo(ImmutableBitSet.of(0, 2)));
+  }
+
+  @Test void testInputFieldsUsedFilter() {
+    final String sql = "select * from emp where sal > 1000";
+    final RelNode rel = sql(sql).toRel();
+    assertThat(Util.toLinux(RelOptUtil.toString(rel)),
+        is(""
+            + "LogicalProject(EMPNO=[$0], ENAME=[$1], JOB=[$2], MGR=[$3], HIREDATE=[$4], SAL=[$5], COMM=[$6], DEPTNO=[$7], SLACKER=[$8])\n"
+            + "  LogicalFilter(condition=[>($5, 1000)])\n"
+            + "    LogicalTableScan(table=[[CATALOG, SALES, EMP]])\n"));
+
+    final RelMetadataQuery mq = rel.getCluster().getMetadataQuery();
+    final RelNode filter = rel.getInput(0);
+    final ImmutableBitSet inputFields = mq.getInputFieldsUsed(filter);
+
+    assertThat(inputFields, equalTo(ImmutableBitSet.range(9)));
+  }
+
+  @Test void testInputFieldsUsedCalc() {
+    final String sql = "select empno, job from emp";
+    final RelNode rel = sql(sql).toRel();
+    final HepProgram program = new HepProgramBuilder()
+        .addRuleInstance(CoreRules.PROJECT_TO_CALC)
+        .build();
+    final HepPlanner planner = new HepPlanner(program);
+    planner.setRoot(rel);
+    final RelNode calc = planner.findBestExp();
+    assertThat(calc, instanceOf(Calc.class));
+    assertThat(Util.toLinux(RelOptUtil.toString(calc)),
+        is(""
+            + "LogicalCalc(expr#0..8=[{inputs}], EMPNO=[$t0], JOB=[$t2])\n"
+            + "  LogicalTableScan(table=[[CATALOG, SALES, EMP]])\n"));
+
+    final RelMetadataQuery mq = calc.getCluster().getMetadataQuery();
+    final ImmutableBitSet inputFields = mq.getInputFieldsUsed(calc);
+
+    assertThat(inputFields, equalTo(ImmutableBitSet.of(0, 2)));
+  }
+
+  @Test void testInputFieldsUsedAggregate() {
+    final String sql = "select deptno, sum(sal) from emp group by deptno";
+    final RelNode rel = sql(sql).toRel();
+    assertThat(Util.toLinux(RelOptUtil.toString(rel)),
+        is(""
+            + "LogicalAggregate(group=[{0}], EXPR$1=[SUM($1)])\n"
+            + "  LogicalProject(DEPTNO=[$7], SAL=[$5])\n"
+            + "    LogicalTableScan(table=[[CATALOG, SALES, EMP]])\n"));
+
+    final RelMetadataQuery mq = rel.getCluster().getMetadataQuery();
+    final ImmutableBitSet inputFields = mq.getInputFieldsUsed(rel);
+
+    assertThat(inputFields, equalTo(ImmutableBitSet.of(0, 1)));
   }
 
   // ----------------------------------------------------------------------
@@ -687,6 +1461,17 @@ public class RelMetadataTest {
     fixture.assertThatRowCount(is(EMP_SIZE), is(0D), is(123456D));
   }
 
+  /** Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-7346">[CALCITE-7346]
+   * Prevent overflow in metadata row-count when LIMIT/OFFSET literal exceeds Long range</a>. */
+  @Test void testRowCountSortLimitBeyondLong() {
+    final BigDecimal fetch = BigDecimal.valueOf(Long.MAX_VALUE).add(BigDecimal.ONE);
+    final double fetchDouble = fetch.doubleValue();
+    final String sql = "select * from emp order by ename limit " + fetchDouble;
+    final RelMetadataFixture fixture = sql(sql);
+    fixture.assertThatRowCount(is(EMP_SIZE), is(0D), is(fetchDouble));
+  }
+
   @Test void testRowCountSortHighOffset() {
     final String sql = "select * from emp order by ename offset 123456";
     final RelMetadataFixture fixture = sql(sql);
@@ -732,7 +1517,7 @@ public class RelMetadataTest {
           planner.addRule(EnumerableRules.ENUMERABLE_PROJECT_RULE);
           planner.addRule(EnumerableRules.ENUMERABLE_FILTER_RULE);
           planner.addRule(EnumerableRules.ENUMERABLE_JOIN_RULE);
-          planner.addRule(EnumerableRules.ENUMERABLE_LIMIT_SORT_RULE);
+          planner.addRule(EnumerableRules.ENUMERABLE_LIMIT_RULE);
           planner.addRelTraitDef(ConventionTraitDef.INSTANCE);
           return RelOptCluster.create(planner, cluster.getRexBuilder());
         })
@@ -767,6 +1552,15 @@ public class RelMetadataTest {
   }
 
   /** Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-7154">[CALCITE-7154]
+   * When the offset or limit of a SORT operation is of type BIGINT row count
+   * calculation overflows</a>. */
+  @Test void testRowCountSortLimitOffsetOnFiniteBigint() {
+    final String sql = "select * from emp limit 3000000000 offset 2500000000";
+    sql(sql).assertThatRowCount(is(1d), is(0d), is(3000000000d));
+  }
+
+  /** Test case for
    * <a href="https://issues.apache.org/jira/browse/CALCITE-5944">[CALCITE-5944]
    * Add metadata for Sample</a>. */
   @Test void testRowCountSample() {
@@ -774,6 +1568,18 @@ public class RelMetadataTest {
         .assertThatRowCount(is(EMP_SIZE * 0.5), is(0D), is(Double.POSITIVE_INFINITY));
     sql("select * from emp tablesample system(20)")
         .assertThatRowCount(is(EMP_SIZE * 0.2), is(0D), is(Double.POSITIVE_INFINITY));
+  }
+
+  /** Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-7365">[CALCITE-7365]
+   * RelMdRowCount ignores estimateRowCount() overrides in SingleRel's subclasses</a>. */
+  @Test void testRowCountCustomSingleRel() {
+    final RelNode scan = sql("select * from emp").toRel();
+    final ExpandingRel expanding =
+        new ExpandingRel(scan.getCluster(), scan.getTraitSet(), scan);
+    final RelMetadataQuery mq = scan.getCluster().getMetadataQuery();
+    final double rowCount = mq.getRowCount(expanding);
+    assertThat(rowCount, is(140D));
   }
 
   @Test void testRowCountAggregate() {
@@ -1223,6 +2029,30 @@ public class RelMetadataTest {
         .assertThatAreColumnsUnique(bitSetOf(1), is(true))
         .assertThatAreColumnsUnique(bitSetOf(), is(true))
         .assertThatUniqueKeysAre(bitSetOf());
+  }
+
+  /** Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-7199">[CALCITE-7199]
+   * Improve column uniqueness computation for Join</a>. */
+  @Test void testColumnUniquenessForJoin() {
+    final String sql1 = ""
+        + "select A.empno, B.ename\n"
+        + "from emp A join emp B\n"
+        + "on A.empno = B.empno";
+    final String sql2 = ""
+        + "select B.empno, A.ename\n"
+        + "from emp A join emp B\n"
+        + "on A.empno = B.empno";
+    checkColumnUniquenessForJoin(sql1);
+    checkColumnUniquenessForJoin(sql2);
+  }
+
+  private void checkColumnUniquenessForJoin(String sql) {
+    sql(sql)
+        .assertThatAreColumnsUnique(bitSetOf(0), is(true))
+        .assertThatAreColumnsUnique(bitSetOf(0, 1), is(true))
+        .assertThatAreColumnsUnique(bitSetOf(1), is(false))
+        .assertThatUniqueKeysAre(bitSetOf(0));
   }
 
   @Test void testColumnUniquenessForJoinOnLimit1() {
@@ -2690,7 +3520,7 @@ public class RelMetadataTest {
             ImmutableList.of(
                 AggregateCall.create(SqlStdOperatorTable.COUNT, false, false,
                     false, ImmutableList.of(), ImmutableIntList.of(),
-                    -1, null, RelCollations.EMPTY, 2, join, null, null)));
+                    -1, null, RelCollations.EMPTY, false, join, null, null)));
     rowSize = mq.getAverageRowSize(aggregate);
     columnSizes = mq.getAverageColumnSizes(aggregate);
     assertThat(columnSizes, hasSize(3));
@@ -2709,14 +3539,40 @@ public class RelMetadataTest {
 
   /** Test case for
    * <a href="https://issues.apache.org/jira/browse/CALCITE-6594">[CALCITE-6594]
-   * RelMdSize does not handle ARRAY constructor calls</a>. */
+   * RelMdSize does not handle ARRAY constructor calls</a>,
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-7061">[CALCITE-7061]
+   * RelMdSize does not handle nested ARRAY/MAP constructor calls</a>. */
   @Test void testSizeArrayConstructor() {
-    checkSizeArrayConstructor("SELECT ARRAY[1, 2, 3, 4]", 16d);
-    checkSizeArrayConstructor("SELECT ARRAY[true, false]", 2d);
-    checkSizeArrayConstructor("SELECT ARRAY[CAST(3.14 AS DOUBLE)]", 8d);
+    checkSize("SELECT ARRAY[1, 2, 3, 4]", 16d);
+    checkSize("SELECT ARRAY[true, false]", 2d);
+    checkSize("SELECT ARRAY[CAST(3.14 AS DOUBLE)]", 8d);
+    checkSize("SELECT ARRAY[ARRAY[1,2], ARRAY[2,2], ARRAY[1,1], ARRAY[2,3]]", 32d);
+    checkSize("SELECT ARRAY[ARRAY[1,2], ARRAY[1,1,1], ARRAY[1,1], ARRAY[2,3]]", 36d);
+    checkSize("SELECT ARRAY[MAP[1,2], MAP[1,1,1,2], MAP[1,1], MAP[2,3,4,5,6,7]]", 56d);
   }
 
-  private void checkSizeArrayConstructor(String query, double expected) {
+  /** Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-7061">[CALCITE-7061]
+   * RelMdSize does not handle nested ARRAY/MAP constructor calls</a>. */
+  @Test void testSizeMapConstructor() {
+    checkSize("SELECT MAP[1, 2, 3, 4]", 16d);
+    checkSize("SELECT MAP[1,true,3,false]", 10d);
+    checkSize("SELECT MAP[CAST(3.14 AS DOUBLE),CAST(3.14 AS DOUBLE)]", 16d);
+    checkSize("SELECT MAP[1,ARRAY[true,false],3,ARRAY[true,false]]", 12d);
+    checkSize("SELECT MAP[1,MAP[true,2],3,MAP[false,1]]", 18d);
+  }
+
+  /** Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-7249">[CALCITE-7249]
+   * Support unsigned types in RelMdSize</a>. */
+  @Test void testSizeUnsigned() {
+    checkSize("SELECT CAST (1 AS TINYINT UNSIGNED)", 1d);
+    checkSize("SELECT CAST (1 AS SMALLINT UNSIGNED)", 2d);
+    checkSize("SELECT CAST (1 AS INTEGER UNSIGNED)", 4d);
+    checkSize("SELECT CAST (1 AS BIGINT UNSIGNED)", 8d);
+  }
+
+  private void checkSize(String query, double expected) {
     final RelNode rel = sql(query).toRel();
     final RelMetadataQuery mq = rel.getCluster().getMetadataQuery();
     final List<@Nullable Double> averageColumnSizes = mq.getAverageColumnSizes(rel);
@@ -3069,6 +3925,19 @@ public class RelMetadataTest {
   }
 
   /** Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-4525">[CALCITE-4525]
+   * Pull up predicate will lose some predicates when project contains same RexInputRef</a>. */
+  @Test public void testPullUpPredicatesFromProject6() {
+    final String sql = "select MGR, MGR as manager, MGR as manager1"
+        + " from (select * from emp where MGR = 0)";
+    final RelNode rel = sql(sql).toRel();
+    final RelMetadataQuery mq = rel.getCluster().getMetadataQuery();
+    RelOptPredicateList inputSet = mq.getPulledUpPredicates(rel);
+    ImmutableList<RexNode> pulledUpPredicates = inputSet.pulledUpPredicates;
+    assertThat(pulledUpPredicates, sortsAs("[=($0, 0), =($1, 0), =($2, 0)]"));
+  }
+
+  /** Test case for
    * <a href="https://issues.apache.org/jira/browse/CALCITE-6599">[CALCITE-6599]
    * RelMdPredicates should pull up more predicates from VALUES
    * when there are several literals</a>. */
@@ -3401,8 +4270,8 @@ public class RelMetadataTest {
   @Test void testExpressionLineageBetweenExpressionWithJoin() {
     String sql = "select dept.deptno + empno between 1 and 2"
         + " from emp join dept on emp.deptno = dept.deptno";
-    String expected = "[AND(>=(+([CATALOG, SALES, DEPT].#0.$0, [CATALOG, SALES, EMP].#0.$0), 1),"
-        + " <=(+([CATALOG, SALES, DEPT].#0.$0, [CATALOG, SALES, EMP].#0.$0), 2))]";
+    String expected =
+        "[SEARCH(+([CATALOG, SALES, DEPT].#0.$0, [CATALOG, SALES, EMP].#0.$0), Sarg[[1..2]])]";
     String comment = "'empno' is column 0 in 'catalog.sales.emp', "
         + "'deptno' is column 0 in 'catalog.sales.dept', and "
         + "'dept.deptno + empno between 1 and 2' is translated into "
@@ -3648,6 +4517,18 @@ public class RelMetadataTest {
     assertThat(r, hasSize(1));
     final String resultString = r.iterator().next().toString();
     assertThat(resultString, is("+([CATALOG, SALES, EMP].#0.$5, 1)"));
+  }
+
+  /** Test case for <a href="https://issues.apache.org/jira/browse/CALCITE-7070">[CALCITE-7070]
+   * FILTER_REDUCE_EXPRESSIONS crashes on expression BETWEEN ( NULL) AND X</a>. */
+  @Test void testJoinCrash() {
+    String sql = "SELECT DISTINCT * FROM emp AS cor0 JOIN dept cor1 ON "
+        + "NULL < - - ( + + CAST ( + 47 AS INTEGER ) ) - - - 47";
+    SqlTestFactory factory = SqlTestFactory.INSTANCE
+        .withValidatorConfig(c -> c.withCallRewrite(false))
+        .withSqlToRelConfig(
+            c -> c.withRelBuilderConfigTransform(t -> t.withSimplify(false)));
+    SqlValidatorTester.DEFAULT.convertSqlToRel(factory, sql, false, false);
   }
 
   @Test void testAllPredicates() {
@@ -4442,6 +5323,107 @@ public class RelMetadataTest {
     assertThat(ndv, is(100.0));
   }
 
+  /** Test case of
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-7083">[CALCITE-7083]
+   * RelMdDistinctRowCount aggregates implementation problems</a>. */
+  @Test void testAggregateDistinctRowCount() {
+    // test case of groupKey contains aggregated column
+    sql("select name, sum(sal) from (values ('b', 10), ('b', 20), ('b', 30)) as t(name, sal) "
+        + "group by name")
+        .assertThatDistinctRowCount(bitSetOf(1), is(1d));
+    sql("select name, sum(sal) from (values ('a', 10), ('b', 10), ('c', 10)) as t(name, sal) "
+        + "group by name")
+        .assertThatDistinctRowCount(bitSetOf(1), is(3d));
+    // test case of predicate is not null
+    // LogicalFilter(condition=[=($0, 2)])
+    //  LogicalAggregate(group=[{1}], sumsal=[SUM($0)])
+    //    LogicalValues(tuples=[[{ 10, 1 }, { 20, 2 }, { 30, 3 }]])
+    // since the selectivity of the predicate is guessed, this NDV does not represent the actual
+    // value. This case is only to verify that the predicate will be correctly pushed down
+    // to the Value
+    fixture()
+        .withRelFn(b -> {
+          b.values(new String[]{"sal", "id"}, 10, 1, 20, 2, 30, 3);
+          RelBuilder.GroupKey groupKey = b.groupKey(1);
+          b.aggregate(groupKey, b.sum(false, "sumsal", b.field(0)));
+          RexNode predicate =
+              b.equals(b.field(0), b.literal(2));
+          RelNode filter = b.filter(predicate).build();
+          return filter;
+        })
+        .assertThatDistinctRowCount(bitSetOf(0), is(1d));
+  }
+
+  @Test void testAggregateDistinctRowCountLosslessCast() {
+    final String sql =
+        "select name, sal, cast(sal as varchar(11)) "
+            + "from (values ('b', 10), ('b', 20), ('b', 30)) t(name, sal) "
+            + "group by name, sal, cast(sal as varchar(11))";
+
+    // we expect NDV($i) = NDV(CAST($i)), if cast is lossless
+    sql(sql).assertThatDistinctRowCount(bitSetOf(1), is(3d));
+    sql(sql).assertThatDistinctRowCount(bitSetOf(2), is(3d));
+  }
+
+  @Test void testAggregateDistinctRowCountLosslessCastFilterOnField() {
+    final String sql =
+        "select name, sal, cast(sal as varchar(11))"
+            + "from (values ('b', 10), ('b', 20), ('b', 30)) t(name, sal) "
+            + "where sal = 10 "
+            + "group by name, sal, cast(sal as varchar(11))";
+
+    // we expect NDV($i) = NDV(CAST($i)), if cast is lossless
+    sql(sql).assertThatDistinctRowCount(bitSetOf(1), is(1d));
+    sql(sql).assertThatDistinctRowCount(bitSetOf(2), is(1d));
+  }
+
+  @Test void testAggregateDistinctRowCountLosslessCastFilterOnCastedField() {
+    final String sql =
+        "select name, sal, cast(sal as varchar(11))"
+            + "from (values ('b', 10), ('b', 20), ('b', 30)) t(name, sal) "
+            + "where cast(sal as varchar(11)) = 10 "
+            + "group by name, sal, cast(sal as varchar(11))";
+
+    // we expect NDV($i) = NDV(CAST($i)), if cast is lossless
+    sql(sql).assertThatDistinctRowCount(bitSetOf(1), is(1d));
+    sql(sql).assertThatDistinctRowCount(bitSetOf(2), is(1d));
+  }
+
+  @Test void testAggregateDistinctRowCountLossyCast() {
+    final String sql =
+        "select name, sal, cast(sal as int) "
+            + "from (values ('b', 10.1), ('b', 20.2), ('b', 30.3)) t(name, sal) "
+            + "group by name, sal, cast(sal as int)";
+
+    // we expect NDV($i) >= NDV(CAST($i)), if cast is lossy
+    sql(sql).assertThatDistinctRowCount(bitSetOf(1), is(3d));
+    sql(sql).assertThatDistinctRowCount(bitSetOf(2), closeTo(1.6439107033725735d, 0.1d));
+  }
+
+  @Test void testAggregateDistinctRowCountLossyCastFilterOnField() {
+    final String sql =
+        "select name, sal, cast(sal as int) "
+            + "from (values ('b', 10.1), ('b', 20.2), ('b', 30.3)) t(name, sal) "
+            + "where sal > 20 "
+            + "group by name, sal, cast(sal as int)";
+
+    // we expect NDV($i) >= NDV(CAST($i)), if cast is lossy
+    sql(sql).assertThatDistinctRowCount(bitSetOf(1), closeTo(1.367006838144548, 0.1d));
+    sql(sql).assertThatDistinctRowCount(bitSetOf(2), closeTo(1.0744407789565844, 0.1d));
+  }
+
+  @Test void testAggregateDistinctRowCountLossyCastFilterOnCastedField() {
+    final String sql =
+        "select name, sal, cast(sal as int) "
+            + "from (values ('b', 10.1), ('b', 20.2), ('b', 30.3)) t(name, sal) "
+            + "where cast(sal as int) > 20 "
+            + "group by name, sal, cast(sal as int)";
+
+    // we expect NDV($i) >= NDV(CAST($i)), if cast is lossy
+    sql(sql).assertThatDistinctRowCount(bitSetOf(1), closeTo(1.367006838144548, 0.1d));
+    sql(sql).assertThatDistinctRowCount(bitSetOf(2), closeTo(1.0744407789565844, 0.1d));
+  }
+
   private void checkInputForCollationAndLimit(RelOptCluster cluster, RelOptTable empTable,
       RelOptTable deptTable) {
     final RexBuilder rexBuilder = cluster.getRexBuilder();
@@ -4573,6 +5555,23 @@ public class RelMetadataTest {
      */
     DummyRelNode(RelOptCluster cluster, RelTraitSet traits, RelNode input) {
       super(cluster, traits, input);
+    }
+  }
+
+  /**
+   * A custom SingleRel that expands row count by a factor of 10.
+   * Used to test that estimateRowCount() overrides are respected
+   * by the metadata system.
+   */
+  private static class ExpandingRel extends SingleRel {
+    private static final double EXPANSION_FACTOR = 10.0;
+
+    ExpandingRel(RelOptCluster cluster, RelTraitSet traits, RelNode input) {
+      super(cluster, traits, input);
+    }
+
+    @Override public double estimateRowCount(RelMetadataQuery mq) {
+      return mq.getRowCount(input) * EXPANSION_FACTOR;
     }
   }
 

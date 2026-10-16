@@ -31,6 +31,7 @@ import org.apache.calcite.rex.RexCall;
 import org.apache.calcite.rex.RexInputRef;
 import org.apache.calcite.rex.RexNode;
 import org.apache.calcite.rex.RexShuttle;
+import org.apache.calcite.rex.RexWindowBound;
 import org.apache.calcite.sql.SqlAggFunction;
 import org.apache.calcite.tools.RelBuilderFactory;
 import org.apache.calcite.util.BitSets;
@@ -121,7 +122,7 @@ public class ProjectWindowTransposeRule
           boolean[] update = {false};
           final List<RexNode> clonedOperands = visitList(call.operands, update);
           if (update[0]) {
-            return new Window.RexWinAggCall(
+            return new Window.RexWinAggCall(call.getParserPosition(),
                 (SqlAggFunction) call.getOperator(), call.getType(),
                 clonedOperands, aggCall.ordinal, aggCall.distinct,
                 aggCall.ignoreNulls);
@@ -166,14 +167,18 @@ public class ProjectWindowTransposeRule
         ++aggCallIndex;
       }
 
+      // Adjust Window Group RexWindowBound
+      RexWindowBound newLowerBound = group.lowerBound.accept(indexAdjustment);
+      RexWindowBound newUpperBound = group.upperBound.accept(indexAdjustment);
+
       groups.add(
-          new Window.Group(keys.build(), group.isRows, group.lowerBound,
-              group.upperBound, group.exclude, RelCollations.of(orderKeys), aggCalls));
+          new Window.Group(keys.build(), group.isRows, newLowerBound,
+              newUpperBound, group.exclude, RelCollations.of(orderKeys), aggCalls));
     }
 
     final LogicalWindow newLogicalWindow =
-        LogicalWindow.create(window.getTraitSet(), projectBelowWindow,
-            window.constants, outputBuilder.build(), groups);
+        LogicalWindow.create(window.getTraitSet(), window.getHints(),
+            projectBelowWindow, window.constants, outputBuilder.build(), groups);
 
     // Modify the top LogicalProject
     final List<RexNode> topProjExps =

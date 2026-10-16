@@ -102,28 +102,46 @@ public final class LogicalWindow extends Window {
 
   @Override public LogicalWindow copy(RelTraitSet traitSet,
       List<RelNode> inputs) {
-    return new LogicalWindow(getCluster(), traitSet, sole(inputs), constants,
+    return new LogicalWindow(getCluster(), traitSet, hints, sole(inputs), constants,
       getRowType(), groups);
   }
 
   @Override public Window copy(List<RexLiteral> constants) {
-    return new LogicalWindow(getCluster(), getTraitSet(), getInput(),
+    return new LogicalWindow(getCluster(), getTraitSet(), hints, getInput(),
         constants, getRowType(), groups);
+  }
+
+  @Deprecated // to be removed before 2.0
+  public static LogicalWindow create(RelTraitSet traitSet, RelNode input,
+      List<RexLiteral> constants, RelDataType rowType, List<Group> groups) {
+    return create(traitSet, Collections.emptyList(), input, constants, rowType, groups);
   }
 
   /**
    * Creates a LogicalWindow.
    *
-   * @param input   Input relational expression
    * @param traitSet Trait set
+   * @param hints Hints
+   * @param input Input relational expression
    * @param constants List of constants that are additional inputs
    * @param rowType Output row type
    * @param groups Window groups
    */
-  public static LogicalWindow create(RelTraitSet traitSet, RelNode input,
-      List<RexLiteral> constants, RelDataType rowType, List<Group> groups) {
-    return new LogicalWindow(input.getCluster(), traitSet, input, constants,
+  public static LogicalWindow create(RelTraitSet traitSet, List<RelHint> hints,
+      RelNode input, List<RexLiteral> constants, RelDataType rowType,
+      List<Group> groups) {
+    return new LogicalWindow(input.getCluster(), traitSet, hints, input, constants,
         rowType, groups);
+  }
+
+  /**
+   * Creates a LogicalWindow by parsing a {@link RexProgram}.
+   */
+  @Deprecated // to be removed before 2.0
+  public static RelNode create(RelOptCluster cluster,
+      RelTraitSet traitSet, RelBuilder relBuilder, RelNode child,
+      final RexProgram program) {
+    return create(cluster, traitSet, relBuilder, child, program, Collections.emptyList());
   }
 
   /**
@@ -131,7 +149,7 @@ public final class LogicalWindow extends Window {
    */
   public static RelNode create(RelOptCluster cluster,
       RelTraitSet traitSet, RelBuilder relBuilder, RelNode child,
-      final RexProgram program) {
+      final RexProgram program, List<RelHint> hints) {
     final RelDataType outRowType = program.getOutputRowType();
     // Build a list of distinct groups, partitions and aggregate
     // functions.
@@ -182,6 +200,7 @@ public final class LogicalWindow extends Window {
       for (RexOver over : entry.getValue()) {
         final RexWinAggCall aggCall =
             new RexWinAggCall(
+                over.getParserPosition(),
                 over.getAggOperator(),
                 over.getType(),
                 toInputRefs(over.operands),
@@ -225,11 +244,12 @@ public final class LogicalWindow extends Window {
       }
     }
 
+    int callIndex = 0;
     for (Ord<Group> window : Ord.zip(groups)) {
       for (Ord<RexWinAggCall> over : Ord.zip(window.e.aggCalls)) {
         // Add the k-th over expression of
         // the i-th window to the output of the program.
-        String name = fieldNames.get(over.i);
+        String name = fieldNames.get(callIndex++);
         if (name == null || name.startsWith("$")) {
           name = "w" + window.i + "$o" + over.i;
         }
@@ -287,7 +307,7 @@ public final class LogicalWindow extends Window {
         };
 
     final LogicalWindow window =
-        LogicalWindow.create(traitSet, child, constants, intermediateRowType,
+        LogicalWindow.create(traitSet, hints, child, constants, intermediateRowType,
             groups);
 
     // The order that the "over" calls occur in the groups and

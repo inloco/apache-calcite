@@ -85,7 +85,10 @@ import static org.hamcrest.CoreMatchers.is;
 import static org.hamcrest.CoreMatchers.nullValue;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.closeTo;
+import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.hasToString;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.fail;
 
@@ -1082,14 +1085,17 @@ class SqlFunctionsTest {
 
     assertThat(SqlFunctions.splitPart("abc,,ghi", ",", 2), is(""));
     assertThat(SqlFunctions.splitPart("", ",", 1), is(""));
-    assertThat(SqlFunctions.splitPart("abc", "", 1), is(""));
-
-    assertThat(SqlFunctions.splitPart(null, ",", 1), is(""));
-    assertThat(SqlFunctions.splitPart("abc,def", null, 1), is(""));
+    // Tested on Postgres 17: empty delimiter
+    assertThat(SqlFunctions.splitPart("abc", "", 1), is("abc"));
+    assertThat(SqlFunctions.splitPart("abc", "", 2), is(""));
     assertThat(SqlFunctions.splitPart("abc,def", ",", 0), is(""));
 
     assertThat(SqlFunctions.splitPart("abc,def", ",", 3), is(""));
     assertThat(SqlFunctions.splitPart("abc,def", ",", -3), is(""));
+
+    // Test case for https://issues.apache.org/jira/browse/CALCITE-7468
+    // The SPLIT_PART implementation is incorrect for regex patterns
+    assertThat(SqlFunctions.splitPart("abc.def", ".", 1), is("abc"));
   }
 
   @Test void testByteString() {
@@ -2031,5 +2037,60 @@ class SqlFunctionsTest {
 
   private long sqlTimestamp(String str) {
     return toLong(java.sql.Timestamp.valueOf(str));
+  }
+  @Test void testLeftShift() {
+    // Test 1-byte array
+    byte[] data1 = {(byte) 0x0F}; // 00001111
+    for (int shift = -10; shift <= 10; shift++) {
+      byte[] result = SqlFunctions.leftShift(data1.clone(), shift);
+      // Just verify it doesn't crash and returns correct length
+      assertEquals(1, result.length);
+    }
+
+    // Test 2-byte array
+    byte[] data2 = {(byte) 0x12, (byte) 0x34};
+    for (int shift = -18; shift <= 18; shift++) {
+      byte[] result = SqlFunctions.leftShift(data2.clone(), shift);
+      assertEquals(2, result.length);
+    }
+
+    // Verify specific known cases
+    assertArrayEquals(new byte[]{(byte) 0xAB, (byte) 0xCD},
+        SqlFunctions.leftShift(new byte[]{(byte) 0xAB, (byte) 0xCD}, 0));
+
+    assertArrayEquals(new byte[]{(byte) 0x80, (byte) 0x00},
+        SqlFunctions.leftShift(new byte[]{(byte) 0x40, (byte) 0x00}, 1));
+  }
+
+  @Test void testCombineQueryResults() {
+    // Test combining two equal-length lists
+    List<Integer> list1 = Arrays.asList(1, 2, 3);
+    List<Integer> list2 = Arrays.asList(10, 20, 30);
+    List<Object[]> result = SqlFunctions.combineQueryResults(new List[]{list1, list2});
+
+    assertThat(result, hasSize(3));
+    assertArrayEquals(new Object[]{1, 10}, result.get(0));
+    assertArrayEquals(new Object[]{2, 20}, result.get(1));
+    assertArrayEquals(new Object[]{3, 30}, result.get(2));
+
+    // Test combining lists of different lengths (shorter list padded with nulls)
+    List<String> listA = Arrays.asList("a", "b");
+    List<String> listB = Arrays.asList("x", "y", "z", "w");
+    result = SqlFunctions.combineQueryResults(new List[]{listA, listB});
+
+    assertThat(result, hasSize(4));
+    assertArrayEquals(new Object[]{"a", "x"}, result.get(0));
+    assertArrayEquals(new Object[]{"b", "y"}, result.get(1));
+    assertArrayEquals(new Object[]{null, "z"}, result.get(2));
+    assertArrayEquals(new Object[]{null, "w"}, result.get(3));
+
+    // Test with empty list
+    List<Integer> emptyList = Collections.emptyList();
+    List<Integer> nonEmpty = Arrays.asList(100, 200);
+    result = SqlFunctions.combineQueryResults(new List[]{emptyList, nonEmpty});
+
+    assertThat(result, hasSize(2));
+    assertArrayEquals(new Object[]{null, 100}, result.get(0));
+    assertArrayEquals(new Object[]{null, 200}, result.get(1));
   }
 }

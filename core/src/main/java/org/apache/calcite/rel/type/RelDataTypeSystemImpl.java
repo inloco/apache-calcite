@@ -46,8 +46,7 @@ public abstract class RelDataTypeSystemImpl implements RelDataTypeSystem {
   @Override public int getMaxScale(SqlTypeName typeName) {
     switch (typeName) {
     case DECIMAL:
-      // from 1.39, this will be 'return 19;'
-      return getMaxNumericScale();
+      return 19;
     case INTERVAL_YEAR:
     case INTERVAL_YEAR_MONTH:
     case INTERVAL_MONTH:
@@ -107,8 +106,7 @@ public abstract class RelDataTypeSystemImpl implements RelDataTypeSystem {
     case VARBINARY:
       return RelDataType.PRECISION_NOT_SPECIFIED;
     case DECIMAL:
-      // from 1.39, this will be 'return getMaxPrecision(typeName);'
-      return getMaxNumericPrecision();
+      return getMaxPrecision(typeName);
     case INTERVAL_YEAR:
     case INTERVAL_YEAR_MONTH:
     case INTERVAL_MONTH:
@@ -126,12 +124,16 @@ public abstract class RelDataTypeSystemImpl implements RelDataTypeSystem {
     case BOOLEAN:
       return 1;
     case TINYINT:
+    case UTINYINT:
       return 3;
     case SMALLINT:
+    case USMALLINT:
       return 5;
     case INTEGER:
+    case UINTEGER:
       return 10;
     case BIGINT:
+    case UBIGINT:
       return 19;
     case REAL:
       return 7;
@@ -183,8 +185,7 @@ public abstract class RelDataTypeSystemImpl implements RelDataTypeSystem {
   @Override public int getMaxPrecision(SqlTypeName typeName) {
     switch (typeName) {
     case DECIMAL:
-      // from 1.39, this will be 'return 19;'
-      return getMaxNumericPrecision();
+      return 19;
     case VARCHAR:
     case CHAR:
       return 65536;
@@ -258,13 +259,13 @@ public abstract class RelDataTypeSystemImpl implements RelDataTypeSystem {
   }
 
   @SuppressWarnings("deprecation")
-  @Override public int getMaxNumericScale() {
-    return 19;
+  @Override public final int getMaxNumericScale() {
+    return getMaxScale(SqlTypeName.DECIMAL);
   }
 
   @SuppressWarnings("deprecation")
-  @Override public int getMaxNumericPrecision() {
-    return 19;
+  @Override public final int getMaxNumericPrecision() {
+    return getMaxPrecision(SqlTypeName.DECIMAL);
   }
 
   @Override public RoundingMode roundingMode() {

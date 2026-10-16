@@ -74,6 +74,8 @@ public class MysqlSqlDialect extends SqlDialect {
             return 6;
           case DECIMAL:
             return 65;
+          case UBIGINT:
+            return 20;
           default:
             return super.getMaxPrecision(typeName);
           }
@@ -194,6 +196,18 @@ public class MysqlSqlDialect extends SqlDialect {
               type.getSqlTypeName(),
               SqlParserPos.ZERO),
           SqlParserPos.ZERO);
+    case UTINYINT:
+    case USMALLINT:
+    case UINTEGER:
+      throw new RuntimeException(
+          "MySQL doesn't support UNSIGNED TINYINT/SMALLINT/INTEGER!");
+    case UBIGINT:
+      return new SqlDataTypeSpec(
+          new SqlAlienSystemTypeNameSpec(
+              "UNSIGNED",
+              type.getSqlTypeName(),
+              SqlParserPos.ZERO),
+          SqlParserPos.ZERO);
     case TIMESTAMP:
       return new SqlDataTypeSpec(
           new SqlAlienSystemTypeNameSpec(
@@ -243,12 +257,16 @@ public class MysqlSqlDialect extends SqlDialect {
       int leftPrec, int rightPrec) {
     switch (call.getKind()) {
     case POSITION:
-      final SqlWriter.Frame frame = writer.startFunCall("INSTR");
-      writer.sep(",");
-      call.operand(1).unparse(writer, leftPrec, rightPrec);
+      final SqlWriter.Frame f = writer.startFunCall("LOCATE");
       writer.sep(",");
       call.operand(0).unparse(writer, leftPrec, rightPrec);
-      writer.endFunCall(frame);
+      writer.sep(",");
+      call.operand(1).unparse(writer, leftPrec, rightPrec);
+      if (call.operandCount() == 3) {
+        writer.sep(",");
+        call.operand(2).unparse(writer, leftPrec, rightPrec);
+      }
+      writer.endFunCall(f);
       break;
     case FLOOR:
       if (call.operandCount() != 2) {

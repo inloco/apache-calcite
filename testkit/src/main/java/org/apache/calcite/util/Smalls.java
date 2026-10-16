@@ -31,6 +31,7 @@ import org.apache.calcite.linq4j.Queryable;
 import org.apache.calcite.linq4j.function.Deterministic;
 import org.apache.calcite.linq4j.function.Parameter;
 import org.apache.calcite.linq4j.function.SemiStrict;
+import org.apache.calcite.linq4j.function.Strict;
 import org.apache.calcite.linq4j.tree.Expression;
 import org.apache.calcite.linq4j.tree.Expressions;
 import org.apache.calcite.linq4j.tree.MethodCallExpression;
@@ -69,6 +70,7 @@ import org.checkerframework.checker.nullness.qual.Nullable;
 import java.io.IOException;
 import java.lang.reflect.Method;
 import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
 import java.sql.Date;
 import java.sql.Time;
 import java.sql.Timestamp;
@@ -1490,6 +1492,36 @@ public class Smalls {
       } catch (Exception e) {
         return null;
       }
+    }
+  }
+
+  /** User-defined function with return type byte[]. */
+  @Strict
+  public static class ByteArrayFunction {
+    public static byte[] eval(String s) {
+      return s.getBytes(StandardCharsets.UTF_8);
+    }
+  }
+
+  /** User-defined function with parameter type byte[]. */
+  @Strict
+  public static class ByteArrayLengthFunction {
+    public static int eval(byte[] bytes) {
+      return bytes.length;
+    }
+  }
+
+  /** User-defined function with return type Character[]. */
+  public static class CharacterArrayFunction {
+    public static Character[] eval(String s) {
+      if (s == null) {
+        return null;
+      }
+      Character[] characters = new Character[s.length()];
+      for (int i = 0; i < s.length(); i++) {
+        characters[i] = s.charAt(i);
+      }
+      return characters;
     }
   }
 }

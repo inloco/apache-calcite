@@ -31,6 +31,7 @@ import org.apache.calcite.linq4j.tree.Expressions;
 import org.apache.calcite.linq4j.tree.ParameterExpression;
 import org.apache.calcite.linq4j.tree.Primitive;
 import org.apache.calcite.linq4j.tree.Statement;
+import org.apache.calcite.linq4j.tree.Types;
 import org.apache.calcite.linq4j.tree.Types.RecordType;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rex.RexBuilder;
@@ -45,6 +46,7 @@ import org.apache.calcite.rex.RexLambdaRef;
 import org.apache.calcite.rex.RexLiteral;
 import org.apache.calcite.rex.RexLocalRef;
 import org.apache.calcite.rex.RexNode;
+import org.apache.calcite.rex.RexNodeAndFieldIndex;
 import org.apache.calcite.rex.RexOver;
 import org.apache.calcite.rex.RexPatternFieldRef;
 import org.apache.calcite.rex.RexProgram;
@@ -334,6 +336,7 @@ public class RexToLixTranslator implements RexVisitor<RexToLixTranslator.Result>
 
     switch (targetType.getSqlTypeName()) {
     case ARRAY:
+    case MULTISET:
       final RelDataType sourceDataType = sourceType.getComponentType();
       final RelDataType targetDataType = targetType.getComponentType();
       assert sourceDataType != null;
@@ -355,6 +358,7 @@ public class RexToLixTranslator implements RexVisitor<RexToLixTranslator.Result>
 
     case VARBINARY:
     case BINARY:
+      int binaryPrecision = targetType.getPrecision();
       switch (sourceType.getSqlTypeName()) {
       case CHAR:
       case VARCHAR:
@@ -362,6 +366,19 @@ public class RexToLixTranslator implements RexVisitor<RexToLixTranslator.Result>
             new ConstantExpression(Charset.class, sourceType.getCharset()));
       case UUID:
         return Expressions.call(BuiltInMethod.UUID_TO_BINARY.method, operand);
+      case BIGINT:
+      case INTEGER:
+      case SMALLINT:
+      case TINYINT:
+      case UBIGINT:
+      case UINTEGER:
+      case USMALLINT:
+      case UTINYINT:
+        return Expressions.call(
+            BuiltInMethod.INT_TO_BINARY.method,
+            operand,
+            Expressions.constant(binaryPrecision),
+            Expressions.constant(targetType.getSqlTypeName() == SqlTypeName.BINARY));
       default:
         return defaultExpression.get();
       }
@@ -396,6 +413,20 @@ public class RexToLixTranslator implements RexVisitor<RexToLixTranslator.Result>
       case CHAR:
       case VARCHAR:
         return Expressions.call(BuiltInMethod.STRING_TO_BOOLEAN.method, operand);
+      // Numberic type handle
+      case TINYINT:
+      case SMALLINT:
+      case INTEGER:
+      case BIGINT:
+      case UTINYINT:
+      case USMALLINT:
+      case UINTEGER:
+      case UBIGINT:
+      case DECIMAL:
+      case FLOAT:
+      case REAL:
+      case DOUBLE:
+        return Expressions.call(BuiltInMethod.NUMBER_TO_BOOLEAN.method, operand);
 
       default:
         return defaultExpression.get();
@@ -555,6 +586,32 @@ public class RexToLixTranslator implements RexVisitor<RexToLixTranslator.Result>
         }
       }
       return defaultExpression.get();
+    }
+    case UBIGINT:
+    case UINTEGER:
+    case UTINYINT:
+    case USMALLINT: {
+      Method method;
+      switch (targetType.getSqlTypeName()) {
+      case UBIGINT:
+        method = BuiltInMethod.CAST_TO_ULONG.method;
+        break;
+      case UINTEGER:
+        method = BuiltInMethod.CAST_TO_UINTEGER.method;
+        break;
+      case USMALLINT:
+        method = BuiltInMethod.CAST_TO_USHORT.method;
+        break;
+      case UTINYINT:
+        method = BuiltInMethod.CAST_TO_UBYTE.method;
+        break;
+      default:
+        throw new RuntimeException("Unexpected unsigned type " + targetType.getSqlTypeName());
+      }
+      return Expressions.call(
+          method,
+          operand,
+          Expressions.constant(typeFactory.getTypeSystem().roundingMode()));
     }
     case BIGINT:
     case INTEGER:
@@ -991,6 +1048,7 @@ public class RexToLixTranslator implements RexVisitor<RexToLixTranslator.Result>
                   () -> "value for " + literal).toString()));
     case DATE:
     case TIME:
+    case TIME_TZ:
     case TIME_WITH_LOCAL_TIME_ZONE:
     case INTERVAL_YEAR:
     case INTERVAL_YEAR_MONTH:
@@ -999,6 +1057,7 @@ public class RexToLixTranslator implements RexVisitor<RexToLixTranslator.Result>
       javaClass = int.class;
       break;
     case TIMESTAMP:
+    case TIMESTAMP_TZ:
     case TIMESTAMP_WITH_LOCAL_TIME_ZONE:
     case INTERVAL_DAY:
     case INTERVAL_DAY_HOUR:
@@ -1139,6 +1198,13 @@ public class RexToLixTranslator implements RexVisitor<RexToLixTranslator.Result>
   public static Expression translateCondition(RexProgram program,
       JavaTypeFactory typeFactory, BlockBuilder list, InputGetter inputGetter,
       Function1<String, InputGetter> correlates, SqlConformance conformance) {
+    return translateCondition(program, typeFactory, list, inputGetter,
+        correlates, conformance, false);
+  }
+
+  public static Expression translateCondition(RexProgram program,
+      JavaTypeFactory typeFactory, BlockBuilder list, InputGetter inputGetter,
+      Function1<String, InputGetter> correlates, SqlConformance conformance, boolean nullable) {
     RexLocalRef condition = program.getCondition();
     if (condition == null) {
       return RexImpTable.TRUE_EXPR;
@@ -1150,7 +1216,7 @@ public class RexToLixTranslator implements RexVisitor<RexToLixTranslator.Result>
     translator = translator.setCorrelates(correlates);
     return translator.translate(
         condition,
-        RexImpTable.NullAs.FALSE);
+        nullable ? RexImpTable.NullAs.NULL : RexImpTable.NullAs.FALSE);
   }
 
   /** Returns whether an expression is nullable.
@@ -1461,7 +1527,9 @@ public class RexToLixTranslator implements RexVisitor<RexToLixTranslator.Result>
    * }
    */
   private Result implementCaseWhen(RexCall call) {
-    final Type returnType = currentStorageType != null
+    // ROW values need their physical storage type; scalar CASE results must keep
+    // their SQL-derived Java type even when the enclosing row stores Objects.
+    final Type returnType = call.getType().isStruct() && currentStorageType != null
         ? currentStorageType : typeFactory.getJavaClass(call.getType());
     final ParameterExpression valueVariable =
         Expressions.parameter(returnType,
@@ -1586,29 +1654,35 @@ public class RexToLixTranslator implements RexVisitor<RexToLixTranslator.Result>
     if (rexWithStorageTypeResultMap.containsKey(key)) {
       return rexWithStorageTypeResultMap.get(key);
     }
-    final Type storageType = currentStorageType != null
-        ? currentStorageType : typeFactory.getJavaClass(dynamicParam.getType());
+    final Type valueType = typeFactory.getJavaClass(dynamicParam.getType());
+    final Type storageType = currentStorageType != null ? currentStorageType : valueType;
 
     final boolean isNumeric = SqlTypeFamily.NUMERIC.contains(dynamicParam.getType());
 
     // For numeric types, use java.lang.Number to prevent cast exception
     // when the parameter type differs from the target type
-    final Expression valueExpression = isNumeric
+    final Expression rawValueExpression = isNumeric
         ? EnumUtils.convert(
             EnumUtils.convert(
                 Expressions.call(root, BuiltInMethod.DATA_CONTEXT_GET.method,
                     Expressions.constant("?" + dynamicParam.getIndex())),
                 java.lang.Number.class),
-            storageType)
+            valueType)
         : EnumUtils.convert(
             Expressions.call(root, BuiltInMethod.DATA_CONTEXT_GET.method,
                 Expressions.constant("?" + dynamicParam.getIndex())),
-            storageType);
+            valueType);
+
+    final Expression valueExpression =
+        checkExpressionPadTruncate(rawValueExpression,
+            typeFactory.createJavaType(Types.toClass(rawValueExpression.getType())),
+            dynamicParam.getType());
 
     final ParameterExpression valueVariable =
-        Expressions.parameter(valueExpression.getType(),
-            list.newName("value_dynamic_param"));
-    list.add(Expressions.declare(Modifier.FINAL, valueVariable, valueExpression));
+        Expressions.parameter(storageType, list.newName("value_dynamic_param"));
+    list.add(
+        Expressions.declare(Modifier.FINAL, valueVariable,
+            EnumUtils.convert(valueExpression, storageType)));
     final ParameterExpression isNullVariable =
         Expressions.parameter(Boolean.TYPE, list.newName("isNull_dynamic_param"));
     list.add(
@@ -1727,6 +1801,10 @@ public class RexToLixTranslator implements RexVisitor<RexToLixTranslator.Result>
     list.add(Expressions.declare(Modifier.FINAL, isNullVariable, isNullExpression));
 
     return new Result(isNullVariable, valueVariable);
+  }
+
+  @Override public Result visitNodeAndFieldIndex(RexNodeAndFieldIndex nodeAndFieldIndex) {
+    throw new RuntimeException("cannot translate expression " + nodeAndFieldIndex);
   }
 
   Expression checkNull(Expression expr) {

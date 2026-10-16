@@ -18,6 +18,13 @@
 !use post
 !set outputformat mysql
 
+# [CALCITE-7060] Enable dumping high-level plans in quidem tests
+SELECT * FROM EMP WHERE DEPTNO > 20;
+SELECT "EMP"."ENAME", "EMP"."DEPTNO", "EMP"."GENDER"
+FROM "POST"."EMP" AS "EMP"
+WHERE "EMP"."DEPTNO" > 20
+!explain-validated-on Calcite
+
 # [CALCITE-6751] Reduction of CAST from string to interval is incorrect
 SELECT TIME '10:00:00' + CAST('1' AS INTERVAL SECOND);
 +----------+
@@ -506,6 +513,7 @@ where exists (select 1 from "hr"."emps");
 (3 rows)
 
 !ok
+!if (use_old_decorr) {
 EnumerableCalc(expr#0..1=[{inputs}], deptno=[$t0])
   EnumerableNestedLoopJoin(condition=[true], joinType=[inner])
     EnumerableCalc(expr#0..3=[{inputs}], deptno=[$t0])
@@ -514,6 +522,15 @@ EnumerableCalc(expr#0..1=[{inputs}], deptno=[$t0])
       EnumerableCalc(expr#0..4=[{inputs}], expr#5=[true], i=[$t5])
         EnumerableTableScan(table=[[hr, emps]])
 !plan
+!}
+!if (use_new_decorr) {
+EnumerableNestedLoopJoin(condition=[true], joinType=[semi])
+  EnumerableCalc(expr#0..3=[{inputs}], deptno=[$t0])
+    EnumerableTableScan(table=[[hr, depts]])
+  EnumerableCalc(expr#0..4=[{inputs}], expr#5=[0], DUMMY=[$t5])
+    EnumerableTableScan(table=[[hr, emps]])
+!plan
+!}
 
 # Un-correlated NOT EXISTS
 select "deptno" from "hr"."depts"
@@ -525,6 +542,7 @@ where not exists (select 1 from "hr"."emps");
 (0 rows)
 
 !ok
+!if (use_old_decorr) {
 EnumerableCalc(expr#0..1=[{inputs}], expr#2=[IS NULL($t1)], deptno=[$t0], $condition=[$t2])
   EnumerableNestedLoopJoin(condition=[true], joinType=[left])
     EnumerableCalc(expr#0..3=[{inputs}], deptno=[$t0])
@@ -533,6 +551,15 @@ EnumerableCalc(expr#0..1=[{inputs}], expr#2=[IS NULL($t1)], deptno=[$t0], $condi
       EnumerableCalc(expr#0..4=[{inputs}], expr#5=[true], i=[$t5])
         EnumerableTableScan(table=[[hr, emps]])
 !plan
+!}
+!if (use_new_decorr) {
+EnumerableNestedLoopJoin(condition=[true], joinType=[anti])
+  EnumerableCalc(expr#0..3=[{inputs}], deptno=[$t0])
+    EnumerableTableScan(table=[[hr, depts]])
+  EnumerableCalc(expr#0..4=[{inputs}], expr#5=[0], DUMMY=[$t5])
+    EnumerableTableScan(table=[[hr, emps]])
+!plan
+!}
 
 # Un-correlated EXISTS (table empty)
 select "deptno" from "hr"."depts"
@@ -544,14 +571,24 @@ where exists (select 1 from "hr"."emps" where "empid" < 0);
 (0 rows)
 
 !ok
+!if (use_old_decorr) {
 EnumerableCalc(expr#0..1=[{inputs}], deptno=[$t0])
   EnumerableNestedLoopJoin(condition=[true], joinType=[inner])
     EnumerableCalc(expr#0..3=[{inputs}], deptno=[$t0])
       EnumerableTableScan(table=[[hr, depts]])
     EnumerableAggregate(group=[{0}])
-      EnumerableCalc(expr#0..4=[{inputs}], expr#5=[true], expr#6=[0], expr#7=[<($t0, $t6)], i=[$t5], $condition=[$t7])
+      EnumerableCalc(expr#0..4=[{inputs}], expr#5=[true], expr#6=[CAST($t0):INTEGER NOT NULL], expr#7=[0], expr#8=[<($t6, $t7)], i=[$t5], $condition=[$t8])
         EnumerableTableScan(table=[[hr, emps]])
 !plan
+!}
+!if (use_new_decorr) {
+EnumerableNestedLoopJoin(condition=[true], joinType=[semi])
+  EnumerableCalc(expr#0..3=[{inputs}], deptno=[$t0])
+    EnumerableTableScan(table=[[hr, depts]])
+  EnumerableCalc(expr#0..4=[{inputs}], expr#5=[CAST($t0):INTEGER NOT NULL], expr#6=[0], expr#7=[<($t5, $t6)], empid=[$t0], $condition=[$t7])
+    EnumerableTableScan(table=[[hr, emps]])
+!plan
+!}
 
 # Un-correlated NOT EXISTS (table empty)
 select "deptno" from "hr"."depts"
@@ -566,14 +603,24 @@ where not exists (select 1 from "hr"."emps" where "empid" < 0);
 (3 rows)
 
 !ok
+!if (use_old_decorr) {
 EnumerableCalc(expr#0..1=[{inputs}], expr#2=[IS NULL($t1)], deptno=[$t0], $condition=[$t2])
   EnumerableNestedLoopJoin(condition=[true], joinType=[left])
     EnumerableCalc(expr#0..3=[{inputs}], deptno=[$t0])
       EnumerableTableScan(table=[[hr, depts]])
     EnumerableAggregate(group=[{0}])
-      EnumerableCalc(expr#0..4=[{inputs}], expr#5=[true], expr#6=[0], expr#7=[<($t0, $t6)], i=[$t5], $condition=[$t7])
+      EnumerableCalc(expr#0..4=[{inputs}], expr#5=[true], expr#6=[CAST($t0):INTEGER NOT NULL], expr#7=[0], expr#8=[<($t6, $t7)], i=[$t5], $condition=[$t8])
         EnumerableTableScan(table=[[hr, emps]])
 !plan
+!}
+!if (use_new_decorr) {
+EnumerableNestedLoopJoin(condition=[true], joinType=[anti])
+  EnumerableCalc(expr#0..3=[{inputs}], deptno=[$t0])
+    EnumerableTableScan(table=[[hr, depts]])
+  EnumerableCalc(expr#0..4=[{inputs}], expr#5=[CAST($t0):INTEGER NOT NULL], expr#6=[0], expr#7=[<($t5, $t6)], empid=[$t0], $condition=[$t7])
+    EnumerableTableScan(table=[[hr, emps]])
+!plan
+!}
 
 # EXISTS
 select * from "hr"."emps"
@@ -589,10 +636,19 @@ where exists (
 (3 rows)
 
 !ok
+!if (use_old_decorr) {
 EnumerableHashJoin(condition=[=($1, $5)], joinType=[semi])
   EnumerableTableScan(table=[[hr, emps]])
   EnumerableTableScan(table=[[hr, depts]])
 !plan
+!}
+!if (use_new_decorr) {
+EnumerableHashJoin(condition=[IS NOT DISTINCT FROM($1, $5)], joinType=[semi])
+  EnumerableTableScan(table=[[hr, emps]])
+  EnumerableCalc(expr#0..3=[{inputs}], deptno=[$t0])
+    EnumerableTableScan(table=[[hr, depts]])
+!plan
+!}
 
 # NOT EXISTS
 # Right results, but it would be better if the plan used EnumerableCorrelateRel; see [CALCITE-374]
@@ -607,6 +663,7 @@ where not exists (
 (1 row)
 
 !ok
+!if (use_old_decorr) {
 EnumerableCalc(expr#0..6=[{inputs}], expr#7=[IS NULL($t6)], proj#0..4=[{exprs}], $condition=[$t7])
   EnumerableMergeJoin(condition=[=($1, $5)], joinType=[left])
     EnumerableSort(sort0=[$1], dir0=[ASC])
@@ -616,6 +673,14 @@ EnumerableCalc(expr#0..6=[{inputs}], expr#7=[IS NULL($t6)], proj#0..4=[{exprs}],
         EnumerableAggregate(group=[{0}])
           EnumerableTableScan(table=[[hr, depts]])
 !plan
+!}
+!if (use_new_decorr) {
+EnumerableHashJoin(condition=[IS NOT DISTINCT FROM($1, $5)], joinType=[anti])
+  EnumerableTableScan(table=[[hr, emps]])
+  EnumerableCalc(expr#0..3=[{inputs}], deptno=[$t0])
+    EnumerableTableScan(table=[[hr, depts]])
+!plan
+!}
 
 # NOT EXISTS .. OR NOT EXISTS
 # Right results, but it would be better if the plan used EnumerableCorrelateRel; see [CALCITE-374]
@@ -634,6 +699,7 @@ or not exists (
 (3 rows)
 
 !ok
+!if (use_old_decorr) {
 EnumerableCalc(expr#0..8=[{inputs}], expr#9=[IS NULL($t5)], expr#10=[IS NULL($t8)], expr#11=[OR($t9, $t10)], proj#0..4=[{exprs}], $condition=[$t11])
   EnumerableMergeJoin(condition=[=($6, $7)], joinType=[left])
     EnumerableSort(sort0=[$6], dir0=[ASC])
@@ -651,6 +717,27 @@ EnumerableCalc(expr#0..8=[{inputs}], expr#9=[IS NULL($t5)], expr#10=[IS NULL($t8
           EnumerableCalc(expr#0..3=[{inputs}], expr#4=[90], expr#5=[+($t0, $t4)], $f4=[$t5])
             EnumerableTableScan(table=[[hr, depts]])
 !plan
+!}
+!if (use_new_decorr) {
+EnumerableCalc(expr#0..6=[{inputs}], expr#7=[NOT($t5)], expr#8=[NOT($t6)], expr#9=[OR($t7, $t8)], proj#0..4=[{exprs}], $condition=[$t9])
+  EnumerableHashJoin(condition=[IS NOT DISTINCT FROM($0, $7)], joinType=[left_mark])
+    EnumerableHashJoin(condition=[IS NOT DISTINCT FROM($1, $5)], joinType=[left_mark])
+      EnumerableTableScan(table=[[hr, emps]])
+      EnumerableCalc(expr#0..3=[{inputs}], deptno=[$t0])
+        EnumerableTableScan(table=[[hr, depts]])
+    EnumerableCalc(expr#0..3=[{inputs}], deptno=[$t2], empid=[$t0])
+      EnumerableHashJoin(condition=[=($1, $3)], joinType=[inner])
+        EnumerableCalc(expr#0=[{inputs}], expr#1=[CAST($t0):INTEGER NOT NULL], proj#0..1=[{exprs}])
+          EnumerableAggregate(group=[{0}])
+            EnumerableHashJoin(condition=[IS NOT DISTINCT FROM($1, $2)], joinType=[left_mark])
+              EnumerableCalc(expr#0..4=[{inputs}], proj#0..1=[{exprs}])
+                EnumerableTableScan(table=[[hr, emps]])
+              EnumerableCalc(expr#0..3=[{inputs}], deptno=[$t0])
+                EnumerableTableScan(table=[[hr, depts]])
+        EnumerableCalc(expr#0..3=[{inputs}], expr#4=[90], expr#5=[+($t0, $t4)], deptno=[$t0], $f1=[$t5])
+          EnumerableTableScan(table=[[hr, depts]])
+!plan
+!}
 
 # Left join to a relation with one row is recognized as a trivial semi-join
 # and eliminated.
@@ -2038,7 +2125,6 @@ EnumerableAggregate(group=[{}], C=[COUNT()])
   EnumerableValues(tuples=[[]])
 !plan
 
-!if (fixed.calcite6828) {
 # [CALCITE-1659] Simplifying CAST('YYYY-MM-DD hh:mm:ss.SSS' as TIMESTAMP)
 # should round the sub-second fraction
 select TIMESTAMP '2016-02-26 19:06:00.123456789',
@@ -2060,9 +2146,6 @@ select TIMESTAMP '2016-02-26 19:06:00.123456789',
 EnumerableValues(tuples=[[{ 2016-02-26 19:06:00.123, 2016-02-26 19:06:00, 2016-02-26 19:06:00, 2016-02-26 19:06:00.1, 2016-02-26 19:06:00.12, 2016-02-26 19:06:00.123, 2016-02-26 19:06:00.123, 2016-02-26 19:06:00.123 }]])
 !plan
 
-!}
-
-!if (fixed.calcite6828) {
 # [CALCITE-1664] CAST('<string>' as TIMESTAMP) adds part of sub-second fraction to the value
 select
   TIMESTAMP '2016-02-26 19:06:00.12345678',
@@ -2079,7 +2162,6 @@ select
 
 !ok
 
-!}
 # TIMESTAMPDIFF with 'flag' literal as time unit argument
 SELECT TIMESTAMPDIFF(quarter, TIMESTAMP '2008-12-25', TIMESTAMP '2008-09-25');
 +--------+
@@ -2242,40 +2324,68 @@ values atan2(0.5, 2);
 
 !ok
 
-!set outputformat csv
-
 # [CALCITE-1167] OVERLAPS should match even if operands are in (high, low) order
 values ((date '1999-12-01', date '2001-12-31') overlaps (date '2001-01-01' , date '2002-11-11'));
-EXPR$0
-true
++--------+
+| EXPR$0 |
++--------+
+| true   |
++--------+
+(1 row)
+
 !ok
 
 values ((date '2001-12-31', date '1999-12-01') overlaps (date '2001-01-01' , date '2002-11-11'));
-EXPR$0
-true
++--------+
+| EXPR$0 |
++--------+
+| true   |
++--------+
+(1 row)
+
 !ok
 
 values ((date '2001-12-31', date '1999-12-01') overlaps (date '2002-11-11', date '2001-01-01'));
-EXPR$0
-true
++--------+
+| EXPR$0 |
++--------+
+| true   |
++--------+
+(1 row)
+
 !ok
 
 values ((date '2001-12-31', date '1999-12-01') overlaps (date '2002-01-01', date '2002-11-11'));
-EXPR$0
-false
++--------+
+| EXPR$0 |
++--------+
+| false  |
++--------+
+(1 row)
+
 !ok
 
 # Sub-query returns a MAP, column is renamed, and enclosing query references the map.
 select mycol['b'] as x
 from (select map['a', false, 'b', true] from (values (2))) as t(mycol);
-X
-true
++------+
+| X    |
++------+
+| true |
++------+
+(1 row)
+
 !ok
 
 # JSON
 values json_exists('{"foo":"bar"}', 'strict $.foo' false on error);
-EXPR$0
-true
++--------+
+| EXPR$0 |
++--------+
+| true   |
++--------+
+(1 row)
+
 !ok
 
 # [CALCITE-2908] Implement SQL LAST_DAY function
@@ -2288,22 +2398,32 @@ with data(c_date, c_timestamp) as (select * from (values
     (DATE'2019-06-28', TIMESTAMP '2019-06-28 17:32:01'),
     (DATE'2019-12-12', TIMESTAMP '2019-12-12 12:12:01')))
 select last_day(c_date), last_day(c_timestamp) from data;
-EXPR$0, EXPR$1
-1965-01-31, 1965-01-31
-2019-01-31, 2019-01-31
-2019-02-28, 2019-02-28
-2019-02-28, 2019-02-28
-2019-03-31, 2019-03-31
-2019-06-30, 2019-06-30
-2019-12-31, 2019-12-31
++------------+------------+
+| EXPR$0     | EXPR$1     |
++------------+------------+
+| 1965-01-31 | 1965-01-31 |
+| 2019-01-31 | 2019-01-31 |
+| 2019-02-28 | 2019-02-28 |
+| 2019-02-28 | 2019-02-28 |
+| 2019-03-31 | 2019-03-31 |
+| 2019-06-30 | 2019-06-30 |
+| 2019-12-31 | 2019-12-31 |
++------------+------------+
+(7 rows)
+
 !ok
 
 # [CALCITE-3142] An NPE when rounding a nullable numeric
 SELECT ROUND(CAST((X/Y) AS NUMERIC), 2)
 FROM (VALUES (1, 2), (NULLIF(5, 5), NULLIF(5, 5))) A(X, Y);
-EXPR$0
-0.00
-null
++--------+
+| EXPR$0 |
++--------+
+|   0.00 |
+|        |
++--------+
+(2 rows)
+
 !ok
 
 # [CALCITE-3143]Dividing NULLIF clause may cause Division by zero error
@@ -2312,17 +2432,27 @@ FROM (
   SELECT SUM("X") / NULLIF(SUM(0),0) AS Z
   FROM (VALUES (1.1, 2.5), (4.51, 32.5)) A(X, Y)
   GROUP BY "Y");
-EXPR$0
-88
-88
++--------+
+| EXPR$0 |
++--------+
+|     88 |
+|     88 |
++--------+
+(2 rows)
+
 !ok
 
 # [CALCITE-3150] NPE in UPPER when repeated and combine with LIKE
 SELECT "NAME"
 FROM (VALUES ('Bill'), NULLIF('x', 'x'), ('Eric')) A(NAME)
 WHERE UPPER("NAME") LIKE 'B%' AND UPPER("NAME") LIKE '%L';
-NAME
-Bill
++------+
+| NAME |
++------+
+| Bill |
++------+
+(1 row)
+
 !ok
 
 # [CALCITE-3717] Query fails with "division by zero" exception
@@ -2339,32 +2469,45 @@ FROM (VALUES (0, 2, 4, 8),
    (1, 2, 4, 0),
    (0, 0, 0, 0),
    (1, 2, 4, 8),
-   (CAST(null as int), CAST(null as int), CAST(null as int), CAST(null as int))) AS T(A,B,C,D);
-V
-13.00000000
-9.50000000
-1.75000000
-1.87500000
-null
-0E-8
-14.00000000
+   (CAST(null as int), CAST(null as int), CAST(null as int), CAST(null as int))) AS T(A,B,C,D) order by V;
++-------------+
+| V           |
++-------------+
+|        0E-8 |
+|  1.75000000 |
+|  1.87500000 |
+|  9.50000000 |
+| 13.00000000 |
+| 14.00000000 |
+|             |
++-------------+
+(7 rows)
+
 !ok
 
 # TIMESTAMP literals without a time part are OK.
 SELECT TIMESTAMP '1969-07-20' AS ts;
-TS
-1969-07-20 00:00:00
++---------------------+
+| TS                  |
++---------------------+
+| 1969-07-20 00:00:00 |
++---------------------+
+(1 row)
+
 !ok
 
 # Short TIMESTAMP literals are equivalent to long TIMESTAMP literals
 SELECT TIMESTAMP '1969-07-20' + i AS ts
 FROM (VALUES (INTERVAL '1' DAY)) AS t (i)
 GROUP BY TIMESTAMP '1969-07-20 00:00:00' + i;
-TS
-1969-07-21 00:00:00
-!ok
++---------------------+
+| TS                  |
++---------------------+
+| 1969-07-21 00:00:00 |
++---------------------+
+(1 row)
 
-!set outputformat mysql
+!ok
 
 # [CALCITE-5870] Allow literals like DECIMAL '12.3' (consistent with Postgres)
 # Test a decimal value between decimal logic for range checking.
@@ -2438,24 +2581,6 @@ FROM "hr"."emps";
 | 29500.0 |
 | 36500.0 |
 +---------+
-(4 rows)
-
-!ok
-
-!use post
-
-# [CALCITE-4512] GROUP BY expression with argument name same with SELECT field and alias causes validation error
-SELECT floor(empno/2) as empno
-FROM emps
-GROUP BY floor(empno/2);
-+-------+
-| EMPNO |
-+-------+
-|    50 |
-|    55 |
-|    60 |
-|    65 |
-+-------+
 (4 rows)
 
 !ok

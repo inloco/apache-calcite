@@ -30,7 +30,6 @@ dependencies {
     implementation("net.hydromatic:scott-data-hsqldb")
     implementation("net.hydromatic:steelwheels-data-hsqldb")
     implementation("org.apache.commons:commons-dbcp2")
-    implementation("org.apache.commons:commons-lang3")
     implementation("org.apache.commons:commons-pool2")
     implementation("org.hamcrest:hamcrest")
     implementation("org.hsqldb:hsqldb::jdk8")
@@ -44,7 +43,9 @@ dependencies {
 }
 
 tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
-    kotlinOptions {
-        jvmTarget = "1.8"
+    compilerOptions {
+        jvmTarget.set(
+                org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_1_8
+        )
     }
 }

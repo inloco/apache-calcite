@@ -36,7 +36,21 @@ import static java.util.Objects.requireNonNull;
  */
 public class SqlUpdate extends SqlCall {
   public static final SqlSpecialOperator OPERATOR =
-      new SqlSpecialOperator("UPDATE", SqlKind.UPDATE);
+      new SqlSpecialOperator("UPDATE", SqlKind.UPDATE) {
+        @SuppressWarnings("argument.type.incompatible")
+        @Override public SqlCall createCall(@Nullable SqlLiteral functionQualifier,
+            SqlParserPos pos,
+            @Nullable SqlNode... operands) {
+          return new SqlUpdate(
+              pos,
+              operands[0],
+              (SqlNodeList) operands[1],
+              (SqlNodeList) operands[2],
+              operands[3],
+              (SqlSelect) operands[4],
+              (SqlIdentifier) operands[5]);
+        }
+      };
 
   SqlNode targetTable;
   SqlNodeList targetColumnList;
@@ -79,7 +93,7 @@ public class SqlUpdate extends SqlCall {
   @SuppressWarnings("nullness")
   @Override public List<@Nullable SqlNode> getOperandList() {
     return ImmutableNullableList.of(targetTable, targetColumnList,
-        sourceExpressionList, condition, alias);
+        sourceExpressionList, condition, sourceSelect, alias);
   }
 
   @SuppressWarnings("assignment.type.incompatible")
@@ -99,7 +113,7 @@ public class SqlUpdate extends SqlCall {
       condition = operand;
       break;
     case 4:
-      sourceExpressionList = requireNonNull((SqlNodeList) operand);
+      sourceSelect = (SqlSelect) operand;
       break;
     case 5:
       alias = (SqlIdentifier) operand;
@@ -145,9 +159,13 @@ public class SqlUpdate extends SqlCall {
   }
 
   /**
-   * Gets the source SELECT expression for the data to be updated. Returns
-   * null before the statement has been expanded by
-   * {@link SqlValidatorImpl#performUnconditionalRewrites(SqlNode, boolean)}.
+   * Gets the source SELECT expression for the data to be updated. The SELECT contains the target
+   * table columns followed by the source expressions. For example, for <code>UPDATE target SET
+   * column1 = source_expr1, column5 = source_expr2</code> the source select is
+   * <code>SELECT *, source_expr1, source_expr2</code>.
+   * Returns null before the statement has been expanded by
+   * {@link SqlValidatorImpl#performUnconditionalRewrites(SqlNode, boolean)} and
+   * {@link SqlValidatorImpl#createSourceSelectForUpdate(SqlUpdate)}.
    *
    * @return the source SELECT for the data to be updated
    */

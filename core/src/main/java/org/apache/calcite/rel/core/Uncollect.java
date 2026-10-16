@@ -200,4 +200,9 @@ public class Uncollect extends SingleRel {
     }
     return builder.build();
   }
+
+  /** Gets the aliases for the unnest items. */
+  public List<String> getItemAliases() {
+    return itemAliases;
+  }
 }

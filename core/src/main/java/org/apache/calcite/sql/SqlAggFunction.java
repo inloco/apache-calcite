@@ -27,6 +27,7 @@ import org.apache.calcite.sql.type.SqlReturnTypeInference;
 import org.apache.calcite.sql.validate.SqlValidator;
 import org.apache.calcite.sql.validate.SqlValidatorScope;
 import org.apache.calcite.util.Optionality;
+import org.apache.calcite.util.Static;
 
 import org.checkerframework.checker.nullness.qual.Nullable;
 
@@ -135,6 +136,10 @@ public abstract class SqlAggFunction extends SqlFunction implements Context {
       SqlValidator validator,
       SqlValidatorScope scope,
       SqlValidatorScope operandScope) {
+    if (requiresOver() && !validator.isInWindow()) {
+      throw validator.newValidationError(call,
+          Static.RESOURCE.absentOverClause());
+    }
     super.validateCall(call, validator, scope, operandScope);
     validator.validateAggregateParams(call, null, null, null, scope);
   }
@@ -210,6 +215,28 @@ public abstract class SqlAggFunction extends SqlFunction implements Context {
    * ({@code RESPECT NULLS} or {@code IGNORE NULLS}). */
   public boolean allowsNullTreatment() {
     return false;
+  }
+
+  /** Returns whether this aggregate function skips NULL input values.
+   *
+   * <p>Standard SQL aggregate functions skip NULL input values:
+   * {@code SUM(x)}, {@code AVG(x)}, {@code MIN(x)}, {@code MAX(x)},
+   * {@code COUNT(x)}, etc. For example, {@code SUM(x)} only sums non-NULL
+   * values of x.
+   *
+   * <p>This property is only relevant for aggregate functions that accept
+   * value arguments. Functions like {@code COUNT(*)} that count rows rather
+   * than values are not affected by this property.
+   *
+   * <p>Custom user-defined aggregate functions may treat NULL values as
+   * semantically significant inputs. Such functions should override this
+   * method to return {@code false}.
+   *
+   * @return true if NULL input values are skipped (standard SQL behavior),
+   *         false if NULL input values have semantic significance
+   */
+  public boolean skipsNullInputs() {
+    return true;
   }
 
   /**
