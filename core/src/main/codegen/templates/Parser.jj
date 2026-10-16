@@ -4572,7 +4572,7 @@ SqlNode AtomicRowExpression() :
     |
         e = CompoundIdentifier()
     |
-        LOOKAHEAD({ allowRowValueStar() })
+        LOOKAHEAD(1, <STAR>, { allowRowValueStar() })
         <STAR> { return SqlIdentifier.star(getPos()); }
     |
         e = NewSpecification()

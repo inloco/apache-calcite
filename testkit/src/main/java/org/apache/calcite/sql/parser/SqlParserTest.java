@@ -1565,6 +1565,21 @@ public class SqlParserTest {
             + "WHERE (`DEPT`.`DEPTNO` = `EMP`.`DEPTNO`)), `EMP`.`ENAME`))");
   }
 
+  @Test void testRowWithCase() {
+    expr("ROW(CASE WHEN x IS NULL THEN NULL ELSE x END)")
+        .ok("(ROW((CASE WHEN (`X` IS NULL) THEN NULL ELSE `X` END)))");
+    expr("ROW(1, CASE x WHEN 1 THEN 2 ELSE 3 END)")
+        .ok("(ROW(1, (CASE WHEN (`X` = 1) THEN 2 ELSE 3 END)))");
+    expr("ROW(ROW(CASE WHEN x IS NULL THEN NULL ELSE x END))")
+        .ok("(ROW((ROW((CASE WHEN (`X` IS NULL) THEN NULL ELSE `X` END)))))");
+  }
+
+  @Test void testRowWithStar() {
+    sql("select row(*) from emp")
+        .ok("SELECT (ROW(*))\n"
+            + "FROM `EMP`");
+  }
+
   @Test void testRowWithDot() {
     sql("select (1,2).a from c.t")
         .ok("SELECT ((ROW(1, 2)).`A`)\n"
