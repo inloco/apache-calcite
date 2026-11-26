@@ -680,4 +680,15 @@ public interface SqlConformance {
    * True when the unsigned versions of integer types are supported.
    */
   boolean supportsUnsignedTypes();
+
+  /**
+   * Whether a constructed record remains present when all its fields are NULL.
+   *
+   * <p>Record-oriented engines can enable this to distinguish a NULL record from
+   * a record containing only NULL fields. The default preserves Calcite's SQL
+   * row-null behavior.
+   */
+  default boolean isRowConstructorAlwaysPresent() {
+    return false;
+  }
 }

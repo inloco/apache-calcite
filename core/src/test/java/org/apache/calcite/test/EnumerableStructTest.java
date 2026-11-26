@@ -36,6 +36,7 @@ import org.apache.calcite.rex.RexBuilder;
 import org.apache.calcite.sql.SqlNode;
 import org.apache.calcite.sql.fun.SqlStdOperatorTable;
 import org.apache.calcite.sql.parser.SqlParser;
+import org.apache.calcite.sql.validate.SqlAbstractConformance;
 import org.apache.calcite.sql.validate.SqlValidator;
 import org.apache.calcite.sql2rel.SqlToRelConverter;
 import org.apache.calcite.sql2rel.StandardConvertletTable;
@@ -82,6 +83,11 @@ class EnumerableStructTest {
             planner, root.rel, root.rel.getTraitSet().replace(EnumerableConvention.INSTANCE),
             Collections.emptyList(), Collections.emptyList());
     Map<String, Object> parameters = new HashMap<>();
+    parameters.put("_conformance", new SqlAbstractConformance() {
+      @Override public boolean isRowConstructorAlwaysPresent() {
+        return true;
+      }
+    });
     return EnumerableInterpretable.toBindable(parameters, null, (EnumerableRel) rel,
         EnumerableRel.Prefer.ARRAY).bind(DataContexts.of(parameters)).toList();
   }
@@ -117,6 +123,48 @@ class EnumerableStructTest {
     assertEquals(2, rows.size());
     assertEquals(Arrays.asList(1.0, 2.0), normalize(rows.get(0)));
     assertNull(rows.get(1));
+  }
+
+  @Test void testNullableRecordWithAllNullMembers() throws Exception {
+    List<?> rows = run("select x, case when x = 1 then "
+        + "cast(row(cast(null as varchar), cast(null as varchar)) "
+        + "as row(holder_type varchar, holder_hash varchar)) else null end as holder "
+        + "from (values (0), (1)) t(x)");
+    assertEquals(2, rows.size());
+    assertEquals(Arrays.asList(0, null), normalize(rows.get(0)));
+    assertEquals(Arrays.asList(1, Arrays.asList(null, null)), normalize(rows.get(1)));
+  }
+
+  @Test void testRecordCaseInsideAnotherRecord() throws Exception {
+    List<?> rows = run("select cast(row(case when x = 1 then "
+        + "cast(row(cast(null as varchar), cast(null as varchar)) "
+        + "as row(holder_type varchar, holder_hash varchar)) else null end) "
+        + "as row(holder row(holder_type varchar, holder_hash varchar))) "
+        + "from (values (0), (1)) t(x)");
+    assertEquals(2, rows.size());
+    assertEquals(Collections.singletonList(null), normalize(rows.get(0)));
+    assertEquals(Collections.singletonList(Arrays.asList(null, null)), normalize(rows.get(1)));
+  }
+
+  @Test void testNestedAllNullRecordRetainsPresence() throws Exception {
+    List<?> rows = run("select x, case when x = 1 then cast(row("
+        + "cast(row(cast(null as varchar), cast(null as varchar)) "
+        + "as row(holder_type varchar, holder_hash varchar))) "
+        + "as row(holder row(holder_type varchar, holder_hash varchar))) "
+        + "else null end from (values (0), (1)) t(x)");
+    assertEquals(2, rows.size());
+    assertEquals(Arrays.asList(0, null), normalize(rows.get(0)));
+    assertEquals(Arrays.asList(1, Collections.singletonList(Arrays.asList(null, null))),
+        normalize(rows.get(1)));
+  }
+
+  @Test void testRecordCaseKeepsUnselectedBranchLazy() throws Exception {
+    List<?> rows = run("select case when x = 1 then "
+        + "cast(row(cast(s as integer)) as row(number_value integer)) "
+        + "else cast(row(7) as row(number_value integer)) end "
+        + "from (values (0, 'not-an-integer'), (1, '5')) t(x, s)");
+    assertEquals(Arrays.asList(Collections.singletonList(7), Collections.singletonList(5)),
+        normalize(rows));
   }
 
   /** Derived from FP's Wi-Fi transform regression added in commit 0ba0eb21e. */

@@ -697,7 +697,11 @@ public class RexImpTable {
      * methods. Feel free to decompose further. */
     void populate1() {
       defineMethod(THROW_UNLESS, BuiltInMethod.THROW_UNLESS.method, NullPolicy.NONE);
-      defineMethod(ROW, BuiltInMethod.ARRAY.method, NullPolicy.ALL);
+      define(ROW, (translator, call, operands) ->
+          new MethodImplementor(BuiltInMethod.ARRAY.method,
+              translator.conformance.isRowConstructorAlwaysPresent()
+                  ? NullPolicy.NONE : NullPolicy.ALL, false)
+              .implement(translator, call, operands));
       defineMethod(UPPER, BuiltInMethod.UPPER.method, NullPolicy.STRICT);
       defineMethod(LOWER, BuiltInMethod.LOWER.method, NullPolicy.STRICT);
       defineMethod(INITCAP, BuiltInMethod.INITCAP.method, NullPolicy.STRICT);
