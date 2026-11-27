@@ -33,7 +33,6 @@ import org.apache.calcite.schema.QueryableTable;
 import org.apache.calcite.schema.impl.TableFunctionImpl;
 import org.apache.calcite.sql.SqlWindowTableFunction;
 import org.apache.calcite.sql.validate.SqlConformance;
-import org.apache.calcite.sql.validate.SqlConformanceEnum;
 import org.apache.calcite.sql.validate.SqlUserDefinedTableFunction;
 
 import org.checkerframework.checker.nullness.qual.Nullable;
@@ -142,9 +141,7 @@ public class EnumerableTableFunctionScan extends TableFunctionScan
         PhysTypeImpl.of(typeFactory, getRowType(), pref.prefer(result.format));
     final Expression inputEnumerable =
         builder.append("_input", result.block, false);
-    final SqlConformance conformance =
-        (SqlConformance) implementor.map.getOrDefault("_conformance",
-            SqlConformanceEnum.DEFAULT);
+    final SqlConformance conformance = implementor.getConformance();
 
     builder.add(
         RexToLixTranslator.translateTableFunction(
