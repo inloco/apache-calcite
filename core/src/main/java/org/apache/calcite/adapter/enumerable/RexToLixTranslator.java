@@ -20,7 +20,6 @@ import org.apache.calcite.DataContext;
 import org.apache.calcite.adapter.java.JavaTypeFactory;
 import org.apache.calcite.avatica.util.ByteString;
 import org.apache.calcite.avatica.util.DateTimeUtils;
-import org.apache.calcite.jdbc.JavaTypeFactoryImpl.SyntheticRecordType;
 import org.apache.calcite.linq4j.Ord;
 import org.apache.calcite.linq4j.function.Function1;
 import org.apache.calcite.linq4j.tree.BlockBuilder;
@@ -33,7 +32,6 @@ import org.apache.calcite.linq4j.tree.ParameterExpression;
 import org.apache.calcite.linq4j.tree.Primitive;
 import org.apache.calcite.linq4j.tree.Statement;
 import org.apache.calcite.linq4j.tree.Types;
-import org.apache.calcite.linq4j.tree.Types.RecordType;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rex.RexBuilder;
 import org.apache.calcite.rex.RexCall;
@@ -1406,13 +1404,24 @@ public class RexToLixTranslator implements RexVisitor<RexToLixTranslator.Result>
     return result;
   }
 
+  /** Returns the Java type of a local variable that holds a value of a given type.
+   *
+   * <p>For the reasoning behind this implementation
+   *
+   * @see org.apache.calcite.jdbc.JavaTypeFactoryImpl.SyntheticRecordType
+   * @see JavaTypeFactory#getJavaClass(RelDataType) */
+  private Type javaVariableType(RelDataType type) {
+    final Type javaType = typeFactory.getJavaClass(type);
+    return javaType instanceof Class ? javaType : Object.class;
+  }
+
   /**
    * Returns an {@code Expression} for null literal without losing its type
    * information.
    */
   private ConstantExpression getTypedNullLiteral(RexLiteral literal) {
     assert literal.isNull();
-    Type javaClass = typeFactory.getJavaClass(literal.getType());
+    Type javaClass = javaVariableType(literal.getType());
     switch (literal.getType().getSqlTypeName()) {
     case DATE:
     case TIME:
@@ -1439,7 +1448,7 @@ public class RexToLixTranslator implements RexVisitor<RexToLixTranslator.Result>
     default:
       break;
     }
-    return javaClass == null || javaClass == Void.class || javaClass instanceof RecordType
+    return javaClass == null || javaClass == Void.class
         ? RexImpTable.NULL_EXPR
         : Expressions.constant(null, javaClass);
   }
@@ -1528,17 +1537,7 @@ public class RexToLixTranslator implements RexVisitor<RexToLixTranslator.Result>
    * }
    */
   private Result implementCaseWhen(RexCall call) {
-    // ROW values need their physical storage type; scalar CASE results must keep
-    // their SQL-derived Java type even when the enclosing row stores Objects.
-    Type returnType = typeFactory.getJavaClass(call.getType());
-    if (call.getType().isStruct()) {
-      if (currentStorageType != null) {
-        returnType = currentStorageType;
-      } else if (returnType instanceof SyntheticRecordType) {
-        // SQL ROW constructors use arrays, but Java-backed records keep their class.
-        returnType = Object[].class;
-      }
-    }
+    final Type returnType = javaVariableType(call.getType());
     final ParameterExpression valueVariable =
         Expressions.parameter(returnType,
             list.newName("case_when_value"));
