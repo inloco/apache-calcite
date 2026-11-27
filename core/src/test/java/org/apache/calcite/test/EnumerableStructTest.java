@@ -17,10 +17,10 @@
 package org.apache.calcite.test;
 
 import org.apache.calcite.DataContext;
-import org.apache.calcite.adapter.java.ReflectiveSchema;
 import org.apache.calcite.adapter.enumerable.EnumerableConvention;
 import org.apache.calcite.adapter.enumerable.EnumerableInterpretable;
 import org.apache.calcite.adapter.enumerable.EnumerableRel;
+import org.apache.calcite.adapter.java.ReflectiveSchema;
 import org.apache.calcite.config.CalciteConnectionConfig;
 import org.apache.calcite.jdbc.CalciteSchema;
 import org.apache.calcite.jdbc.JavaRecordType;
@@ -216,19 +216,21 @@ public class EnumerableStructTest {
     });
     CalciteSchema schema = CalciteSchema.createRootSchema(false);
     schema.add("POJO", new ReflectiveSchema(fixture));
-    RelBuilder builder = RelBuilder.create(
-        Frameworks.newConfigBuilder().defaultSchema(schema.plus()).build());
+    RelBuilder builder =
+        RelBuilder.create(Frameworks.newConfigBuilder().defaultSchema(schema.plus()).build());
     builder.scan("POJO", "inputs");
     // Exercise a caller-supplied native result type; SQL inference can erase that metadata.
     JavaTypeFactoryImpl types = (JavaTypeFactoryImpl) builder.getTypeFactory();
-    RexNode conditional = builder.getRexBuilder().makeCall(types.createType(PojoValue.class),
-        SqlStdOperatorTable.CASE,
+    RexBuilder rex = builder.getRexBuilder();
+    RexNode conditional =
+        rex.makeCall(types.createType(PojoValue.class), SqlStdOperatorTable.CASE,
         Arrays.asList(builder.equals(builder.field("choice"), builder.literal(1)),
             builder.field("value"), builder.field("alternative")));
     assertInstanceOf(JavaRecordType.class, conditional.getType());
     List<?> rows = run(builder.project(builder.call(SqlStdOperatorTable.ROW, conditional))
         .build(), schema);
-    assertEquals(Arrays.asList(
+    assertEquals(
+        Arrays.asList(
         Collections.singletonList(selected),
         Collections.singletonList(fallback),
         Collections.singletonList(allNull),
