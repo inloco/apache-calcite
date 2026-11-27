@@ -44,7 +44,6 @@ import org.apache.calcite.rex.RexProgram;
 import org.apache.calcite.rex.RexSimplify;
 import org.apache.calcite.rex.RexUtil;
 import org.apache.calcite.sql.validate.SqlConformance;
-import org.apache.calcite.sql.validate.SqlConformanceEnum;
 import org.apache.calcite.util.BuiltInMethod;
 import org.apache.calcite.util.Pair;
 import org.apache.calcite.util.Util;
@@ -185,9 +184,7 @@ public class EnumerableCalc extends Calc implements EnumerableRel {
     }
 
     final BlockBuilder builder3 = new BlockBuilder();
-    final SqlConformance conformance =
-        (SqlConformance) implementor.map.getOrDefault("_conformance",
-            SqlConformanceEnum.DEFAULT);
+    final SqlConformance conformance = implementor.getConformance();
     List<Expression> expressions =
         RexToLixTranslator.translateProjects(
             program,
