@@ -20,6 +20,7 @@ import org.apache.calcite.DataContext;
 import org.apache.calcite.adapter.java.JavaTypeFactory;
 import org.apache.calcite.avatica.util.ByteString;
 import org.apache.calcite.avatica.util.DateTimeUtils;
+import org.apache.calcite.jdbc.JavaTypeFactoryImpl.SyntheticRecordType;
 import org.apache.calcite.linq4j.Ord;
 import org.apache.calcite.linq4j.function.Function1;
 import org.apache.calcite.linq4j.tree.BlockBuilder;
@@ -1529,9 +1530,15 @@ public class RexToLixTranslator implements RexVisitor<RexToLixTranslator.Result>
   private Result implementCaseWhen(RexCall call) {
     // ROW values need their physical storage type; scalar CASE results must keep
     // their SQL-derived Java type even when the enclosing row stores Objects.
-    final Type returnType = call.getType().isStruct()
-        ? (currentStorageType != null ? currentStorageType : Object[].class)
-        : typeFactory.getJavaClass(call.getType());
+    Type returnType = typeFactory.getJavaClass(call.getType());
+    if (call.getType().isStruct()) {
+      if (currentStorageType != null) {
+        returnType = currentStorageType;
+      } else if (returnType instanceof SyntheticRecordType) {
+        // SQL ROW constructors use arrays, but Java-backed records keep their class.
+        returnType = Object[].class;
+      }
+    }
     final ParameterExpression valueVariable =
         Expressions.parameter(returnType,
             list.newName("case_when_value"));
